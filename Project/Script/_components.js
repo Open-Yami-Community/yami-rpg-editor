@@ -1935,12 +1935,6 @@ class TextBox extends HTMLElement {
 		}
 	}
 
-	// 设置焦点
-	focus() {
-		super.focus()
-		this.input.focus()
-	}
-
 	// 获得焦点
 	getFocus(mode) {
 		return this.input.getFocus(mode)
@@ -10057,6 +10051,12 @@ class CommandList extends HTMLElement {
 		this.windowPointermove = CommandList.windowPointermove.bind(this)
 		this.windowVariableChange = CommandList.windowVariableChange.bind(this)
 
+		// 搜索相关属性
+		this.searchMatches = null
+		this.currentSearchTerm = null
+		this.currentMatchIndex = -1
+		this.keyboardSelectedIndex = -1 // 跟踪快捷键选择的当前项（-1表示没有选中项）
+
 		// 侦听事件
 		this.on('scroll', this.resize)
 		this.on('focus', this.listFocus)
@@ -10089,7 +10089,54 @@ class CommandList extends HTMLElement {
 
 	// 写入数据
 	write(data) {
+		// 重置搜索框状态（新事件页打开时）
+		const searchBox = document.getElementById('event-content-search-box')
+		if (searchBox) {
+			searchBox.style.display = 'none'
+
+			// 取消防抖计时器
+			if (window._searchDebounceTimer) {
+				clearTimeout(window._searchDebounceTimer)
+				window._searchDebounceTimer = null
+			}
+
+			// 清除搜索内容并确保触发清理
+			searchBox.value = ''
+			// 手动触发input事件，确保清除逻辑被执行
+			const inputEvent = new Event('input', { bubbles: true })
+			searchBox.dispatchEvent(inputEvent)
+
+			// 隐藏搜索按钮
+			const searchPrev = document.getElementById('event-search-prev')
+			const searchNext = document.getElementById('event-search-next')
+			const searchClose = document.getElementById('event-search-close')
+			if (searchPrev) searchPrev.style.display = 'none'
+			if (searchNext) searchNext.style.display = 'none'
+			if (searchClose) {
+				searchClose.style.display = 'none'
+				searchClose.textContent = '×' // 确保关闭按钮内容正确
+			}
+			// 隐藏搜索计数器
+			const searchCounter = document.getElementById('search-counter')
+			if (searchCounter) {
+				searchCounter.style.opacity = '0'
+			}
+		}
+
+		// 保护完整数据
+		if (this.data && this.data.length > 100 && data && data.length < 10) {
+			if (!window._completeCommandData) {
+				window._completeCommandData = this.data
+			}
+			return
+		}
+
 		this.data = data
+
+		if (data && data.length > 100) {
+			window._completeCommandData = data
+		}
+
 		this.textContent = ''
 		this.update()
 		if (!data.history) {
@@ -10103,32 +10150,74 @@ class CommandList extends HTMLElement {
 		})
 	}
 
-	// 更新列表
+	// Update the command list
 	update() {
-		// 分析变量数据
+		// Use cached complete data if current data is incomplete
+		if (
+			!window._completeCommandData &&
+			this.data &&
+			this.data.length > 100
+		) {
+			window._completeCommandData = this.data
+		}
+
+		if (window._completeCommandData && this.data && this.data.length < 10) {
+			this.data = window._completeCommandData
+		}
+
 		this.analyzeVariables()
 
 		const { elements } = this
 		elements.start = -1
 		elements.count = 0
 
-		// 创建列表项
+		this.expandedLineNumbers = new Map()
+		this.currentExpandedLine = 0
+		this.allCommands = new Map()
+
 		this.createItems(this.data, 0)
 
-		// 写入索引
 		const { count } = elements
 		for (let i = 0; i < count; i++) {
 			elements[i].dataValue = i
 		}
 
-		// 清除多余的元素
 		this.clearElements(elements.count)
-
-		// 发送更新事件
 		this.dispatchUpdateEvent()
-
-		// 重新调整
 		this.resize()
+		this.updateDelayedCollections()
+		this.outputAllCommands()
+
+		// Re-execute search if active
+		if (this.currentSearchTerm) {
+			const savedTerm = this.currentSearchTerm
+			const savedIndex = this.keyboardSelectedIndex
+
+			if (
+				!savedTerm ||
+				typeof savedTerm !== 'string' ||
+				savedTerm.trim() === ''
+			) {
+				this.currentSearchTerm = null
+				this.searchMatches = null
+				this.currentMatchIndex = -1
+				this.keyboardSelectedIndex = -1
+				return
+			}
+
+			// 使用refreshSearch而不是重新搜索，避免状态清空造成的时序问题
+			setTimeout(() => {
+				this.refreshSearch(savedTerm, savedIndex)
+				// 额外确保高亮完整性
+				setTimeout(() => {
+					this.highlightVisibleMatches()
+				}, 100)
+			}, 100)
+		} else {
+			setTimeout(() => {
+				this.validateAndCleanHighlights()
+			}, 50)
+		}
 	}
 
 	// 重新调整
@@ -10137,6 +10226,22 @@ class CommandList extends HTMLElement {
 
 		// 检查变量有效性
 		this.checkVariables()
+
+		// 如果有搜索词，检查并高亮新渲染的元素
+		if (this.currentSearchTerm) {
+			// 多次延迟检查，确保高亮完整性
+			setTimeout(() => {
+				this.highlightVisibleMatches()
+			}, 50)
+
+			setTimeout(() => {
+				this.highlightVisibleMatches()
+			}, 150)
+
+			setTimeout(() => {
+				this.highlightVisibleMatches()
+			}, 300)
+		}
 	}
 
 	// 更新头部和尾部元素
@@ -10148,6 +10253,26 @@ class CommandList extends HTMLElement {
 	updateOnResize(element) {
 		if (element.contents !== null) {
 			this.updateCommandElement(element)
+
+			// 如果有搜索词，检查这个元素是否需要高亮
+			if (this.currentSearchTerm) {
+				setTimeout(() => {
+					if (
+						element.textContent &&
+						element.textContent.includes(this.currentSearchTerm)
+					) {
+						// 检查是否已经高亮
+						if (!element.querySelector('mark')) {
+							// 简单的普通高亮，让refreshAllHighlights处理当前项
+							this.highlightTextInElement(
+								element,
+								this.currentSearchTerm,
+								false
+							)
+						}
+					}
+				}, 10)
+			}
 		}
 	}
 
@@ -10167,20 +10292,870 @@ class CommandList extends HTMLElement {
 		}
 	}
 
-	// 创建项目
+	// 这些方法不再需要，因为我们已经改为在collectAllCommands中统一处理
+
+	// Count folded items to maintain correct line numbering
+	countFoldedItems(buffer, indent, parent) {
+		// Skip first element (already counted)
+		for (let i = 1; i < buffer.length; i++) {
+			const item = buffer[i]
+			if (item instanceof HTMLElement) {
+				// Folded HTML element
+				const lineNumber = this.currentExpandedLine++
+
+				// 收集折叠元素的信息
+				this.collectCommandInfo(item, lineNumber, true)
+			} else if (item instanceof Array) {
+				// Recursively process child commands
+				this.countFoldedItemsArray(item, indent, parent)
+			}
+		}
+	}
+
+	// Count folded command arrays
+	countFoldedItemsArray(commands, indent, parent) {
+		const length = commands.length
+		for (let i = 0; i < length; i++) {
+			const command = commands[i]
+			// Create buffer to check how many elements this command has
+			const buffer = this.createCommandBuffer(commands, i, indent, parent)
+
+			// Count all elements in buffer
+			for (const item of buffer) {
+				if (item instanceof HTMLElement) {
+					const lineNumber = this.currentExpandedLine++
+					// 收集折叠命令的信息
+					this.collectCommandInfo(item, lineNumber, true)
+				} else if (item instanceof Array) {
+					// Recursively process sub-arrays
+					this.countFoldedItemsArray(item, indent + 1, command)
+				}
+			}
+		}
+		// Blank item
+		const blankLine = this.currentExpandedLine++
+		// 收集折叠的空白行
+		if (this.allCommands) {
+			this.allCommands.set(blankLine, {
+				element: null,
+				command: null,
+				text: '(空白)',
+				indent: indent,
+				folded: true,
+				lineNumber: blankLine
+			})
+		}
+	}
+
+	// 解析条件对象为可读文字
+	parseConditionToText(condition) {
+		try {
+			let variableText = '变量'
+			let operationText = '=='
+			let operandText = '值'
+
+			// 解析变量部分
+			if (condition.variable) {
+				if (
+					condition.variable.type === 'actor' &&
+					condition.variable.key
+				) {
+					// 尝试从varMap获取变量名
+					if (this.varMap && this.varMap[condition.variable.key]) {
+						variableText = this.varMap[condition.variable.key]
+					} else {
+						// 尝试构造可读名称
+						variableText = this.constructActorVariableName(
+							condition.variable
+						)
+					}
+				} else if (condition.variable.name) {
+					variableText = condition.variable.name
+				}
+			}
+
+			// 解析操作符
+			const operationMap = {
+				'greater-or-equal': '>=',
+				greater: '>',
+				'less-or-equal': '<=',
+				less: '<',
+				equal: '==',
+				'not-equal': '!='
+			}
+
+			if (condition.operation && operationMap[condition.operation]) {
+				operationText = operationMap[condition.operation]
+			}
+
+			// 解析操作数
+			if (condition.operand) {
+				if (condition.operand.type === 'constant') {
+					operandText = String(condition.operand.value)
+				} else if (
+					condition.operand.type === 'variable' &&
+					condition.operand.key
+				) {
+					if (this.varMap && this.varMap[condition.operand.key]) {
+						operandText = this.varMap[condition.operand.key]
+					} else {
+						operandText = condition.operand.key
+					}
+				}
+			}
+
+			return `${variableText} ${operationText} ${operandText}`
+		} catch (error) {
+			return '条件解析失败'
+		}
+	}
+
+	// 构造角色变量名称
+	constructActorVariableName(variable) {
+		let result = '事件触发角色'
+
+		// 尝试根据key猜测属性名
+		if (variable.key) {
+			// 这里需要更多信息来正确映射ID到属性名
+			// 暂时返回一个占位符
+			result += '.' + variable.key.substring(0, 8) // 显示前8位ID
+		}
+
+		return result
+	}
+
+	// 收集命令信息
+	collectCommandInfo(element, lineNumber, isFolded = false) {
+		if (!element || !this.allCommands) return
+
+		// 检查是否已经收集过这个元素，避免重复
+		for (const [existingLineNumber, existingInfo] of this.allCommands) {
+			if (existingInfo.element === element) {
+				return
+			}
+		}
+
+		let text = ''
+		const cmd = element.dataItem
+
+		// 检查是否是选项元素（条件分支的选项）
+		const isOptionElement =
+			element.tagName === 'COMMAND-ITEM' &&
+			element.classList.contains('option')
+
+		// 对于所有有命令的元素，优先使用element.contents数组拼接可读文本
+		if (cmd) {
+			// script命令特殊处理 - 根据行号显示对应行的代码
+			if (cmd.id === 'script' && cmd.params && cmd.params.script) {
+				// 分割脚本为多行
+				const scriptLines = cmd.params.script
+					.replace(/\r\n/g, '\n')
+					.replace(/\r/g, '\n')
+					.split('\n')
+
+				// 需要确定当前element对应script的哪一行
+				// 通过查找同一个script命令的所有元素来确定行索引
+				let scriptLineIndex = 0
+
+				// 遍历allCommands找到同一个script命令的所有行
+				for (const [existingLineNumber, existingInfo] of this
+					.allCommands) {
+					if (
+						existingInfo.command === cmd &&
+						existingLineNumber < lineNumber
+					) {
+						scriptLineIndex++
+					}
+				}
+
+				// 显示对应行的内容
+				if (scriptLineIndex < scriptLines.length) {
+					text = scriptLines[scriptLineIndex]
+				} else {
+					text = '' // 超出范围的行显示空
+				}
+			} else if (
+				element &&
+				element.contents &&
+				Array.isArray(element.contents)
+			) {
+				// 其他命令：拼接所有contents的text字段，这样能获得正确的变量名而不是ID
+				for (const content of element.contents) {
+					if (content && content.text !== undefined) {
+						text += content.text
+					}
+				}
+			} else {
+				// fallback到element文本内容
+				if (element && element.textContent) {
+					text = element.textContent.trim()
+				}
+			}
+		} else if (isOptionElement) {
+			// 选项元素使用统一的element.contents拼接方法
+			if (
+				element &&
+				element.contents &&
+				Array.isArray(element.contents)
+			) {
+				for (const content of element.contents) {
+					if (content && content.text !== undefined) {
+						text += content.text
+					}
+				}
+			} else if (element && element.textContent) {
+				text = element.textContent.trim()
+			}
+		} else {
+			// 没有命令的情况（else, end 等特殊元素）
+			// 同样使用element.contents数组拼接可读文本
+			if (
+				element &&
+				element.contents &&
+				Array.isArray(element.contents)
+			) {
+				for (const content of element.contents) {
+					if (content && content.text !== undefined) {
+						text += content.text
+					}
+				}
+			} else if (element && element.textContent) {
+				text = element.textContent.trim()
+			}
+		}
+
+		let finalText = text.trim()
+
+		const commandInfo = {
+			element: element,
+			command: cmd,
+			text: finalText,
+			indent: element.dataIndent || 0,
+			folded: isFolded,
+			lineNumber: lineNumber // 使用0-based系统
+		}
+
+		this.allCommands.set(lineNumber, commandInfo)
+	}
+
+	// 更新需要延迟收集的元素
+	updateDelayedCollections() {
+		if (!this.allCommands) return
+
+		// 首先收集所有需要更新的特殊元素，按命令分组
+		const specialElementsByCommand = new Map()
+
+		for (const [lineNumber, info] of this.allCommands) {
+			if (info.needsDelayedCollection && info.element) {
+				const cmd = info.element.dataItem
+				if (cmd) {
+					if (!specialElementsByCommand.has(cmd)) {
+						specialElementsByCommand.set(cmd, [])
+					}
+					specialElementsByCommand.get(cmd).push({ lineNumber, info })
+				}
+			}
+		}
+
+		// 处理每个命令的特殊元素
+		for (const [cmd, elements] of specialElementsByCommand) {
+			if (cmd.id === 'if') {
+				// 对于 if 命令，根据位置确定文本
+				const hasElse = cmd.params && cmd.params.elseCommands
+
+				elements.forEach((elem, index) => {
+					let text = ''
+
+					// 根据元素数量和位置判断
+					if (hasElse && elements.length === 2) {
+						// 有 else 分支：第一个是 "否则"，第二个是 "结束"
+						text =
+							index === 0
+								? Local.get('command.if.else') || '否则'
+								: Local.get('command.if.end') || '结束'
+					} else if (!hasElse && elements.length === 1) {
+						// 没有 else 分支：唯一的特殊元素是 "结束"
+						text = Local.get('command.if.end') || '结束'
+					} else {
+						// 多个 if-else if 的情况，需要更复杂的判断
+						// 最后一个总是 "结束"
+						if (index === elements.length - 1) {
+							text = Local.get('command.if.end') || '结束'
+						} else {
+							text = Local.get('command.if.else') || '否则'
+						}
+					}
+
+					elem.info.text = text
+					elem.info.needsDelayedCollection = false
+				})
+			} else if (cmd.id === 'loop') {
+				// loop 命令的结束文本
+				elements.forEach((elem) => {
+					// 使用本地化文本
+					elem.info.text =
+						Local.get('command.loop.end') || '重复以上内容'
+					elem.info.needsDelayedCollection = false
+				})
+			} else if (cmd.id === 'switch') {
+				// switch 命令的特殊元素
+				const hasDefault = cmd.params && cmd.params.defaultCommands
+
+				elements.forEach((elem, index) => {
+					let text = ''
+
+					// 先尝试从 contents 中获取文本
+					if (
+						elem.info.element.contents &&
+						Array.isArray(elem.info.element.contents)
+					) {
+						for (const content of elem.info.element.contents) {
+							if (content && content.text !== undefined) {
+								text += content.text + ' '
+							}
+						}
+					}
+
+					// 如果没有获取到文本，使用默认值
+					if (!text.trim()) {
+						// switch 的特殊元素可能是 case 或 default 或 end
+						// 需要根据数量和位置判断
+						if (hasDefault && index === elements.length - 2) {
+							// 倒数第二个是 default
+							text = Local.get('command.switch.default') || '默认'
+						} else if (index === elements.length - 1) {
+							// 最后一个是 end
+							text = Local.get('command.switch.end') || '结束'
+						} else {
+							// 其他都是 case
+							text = Local.get('command.switch.case') || '如果是'
+						}
+					}
+
+					elem.info.text = text.trim()
+					elem.info.needsDelayedCollection = false
+				})
+			}
+		}
+
+		// 保存命令列表到全局变量
+		const commandsArray = []
+		for (const [lineNumber, info] of this.allCommands) {
+			commandsArray.push({
+				lineNumber: info.lineNumber,
+				text: info.text,
+				folded: info.folded,
+				indent: info.indent,
+				element: info.element,
+				command: info.command
+			})
+		}
+
+		window._eventCommandsArray = commandsArray
+	}
+
+	// 输出allCommands变量的函数
+	outputAllCommands() {
+		if (!this.allCommands) {
+			return
+		}
+
+		// 特殊处理：检测第一个顶层trigger命令并更新下一行的text
+		this.processTriggerCommands()
+
+		// 保存命令列表到全局变量
+		const commandsArray = []
+		for (const [lineNumber, info] of this.allCommands) {
+			commandsArray.push({
+				lineNumber: info.lineNumber,
+				text: info.text,
+				folded: info.folded,
+				indent: info.indent,
+				element: info.element,
+				command: info.command
+			})
+		}
+
+		window._eventCommandsArray = commandsArray
+	}
+
+	// 处理trigger类型命令的特殊逻辑
+	processTriggerCommands() {
+		if (!this.allCommands) return
+
+		// 获取所有命令信息按行号排序
+		const sortedCommands = Array.from(this.allCommands.entries()).sort(
+			(a, b) => a[0] - b[0]
+		)
+
+		for (let i = 0; i < sortedCommands.length - 1; i++) {
+			const [currentLineNumber, currentInfo] = sortedCommands[i]
+			const [nextLineNumber, nextInfo] = sortedCommands[i + 1]
+
+			if (currentInfo.command) {
+				const cmd = currentInfo.command
+
+				// 检查是否为showText命令且有content（处理所有级别）
+				if (cmd.id === 'showText' && cmd.params && cmd.params.content) {
+					// 检查下一行是否与当前命令相关联（可能是同一个命令的footer）
+					if (
+						nextInfo.command === cmd ||
+						(nextInfo.element &&
+							currentInfo.element &&
+							nextInfo.element.dataItem ===
+								currentInfo.element.dataItem)
+					) {
+						// 更新下一行的text为content值
+						const originalText = nextInfo.text
+						nextInfo.text = cmd.params.content
+					}
+				}
+
+				// 处理showChoices命令（处理所有级别的缩进）
+				if (
+					cmd.id === 'showChoices' &&
+					cmd.params &&
+					cmd.params.choices
+				) {
+					// 处理该命令的所有选项
+					this.processChoicesCommand(cmd, sortedCommands, i)
+				}
+
+				// 处理if命令（处理所有级别的缩进）
+				if (cmd.id === 'if' && cmd.params && cmd.params.branches) {
+					// 暂时跳过if命令处理，保持原样
+					// this.processIfCommand(cmd, sortedCommands, i)
+				}
+			}
+		}
+	}
+
+	// 处理showChoices命令的选项显示
+	processChoicesCommand(cmd, sortedCommands, cmdIndex) {
+		const choices = cmd.params.choices
+
+		// 直接通过命令的buffer查找选项元素
+		if (cmd.buffer && Array.isArray(cmd.buffer)) {
+			let optionIndex = 0
+			// 遍历buffer，只处理直接的command-item.option元素（不递归处理数组）
+			for (
+				let i = 0;
+				i < cmd.buffer.length && optionIndex < choices.length;
+				i++
+			) {
+				const bufferItem = cmd.buffer[i]
+
+				// 跳过数组元素（这些是嵌套的命令，不处理）
+				if (Array.isArray(bufferItem)) {
+					continue
+				}
+
+				// 检查是否是选项元素（只处理直接的选项元素）
+				if (
+					bufferItem &&
+					bufferItem.tagName === 'COMMAND-ITEM' &&
+					bufferItem.classList &&
+					bufferItem.classList.contains('option')
+				) {
+					// 更宽松的条件：只要是选项元素就处理
+					if (
+						bufferItem.dataItem === cmd ||
+						!bufferItem.dataItem ||
+						bufferItem.dataItem === null
+					) {
+						const choice = choices[optionIndex]
+
+						// 在allCommands中找到对应的info
+						for (const [lineNumber, info] of this.allCommands) {
+							if (info.element === bufferItem) {
+								const originalText = info.text
+								info.text = `选择: ${choice.content}`
+
+								break
+							}
+						}
+
+						optionIndex++
+					}
+				} else if (
+					bufferItem &&
+					bufferItem.tagName === 'COMMAND-ITEM'
+				) {
+				}
+			}
+
+			// 处理footer元素，显示"结束"
+			for (let i = 0; i < cmd.buffer.length; i++) {
+				const bufferItem = cmd.buffer[i]
+
+				// 跳过数组元素
+				if (Array.isArray(bufferItem)) continue
+
+				// 检查是否是footer元素
+				if (
+					bufferItem &&
+					bufferItem.tagName === 'COMMAND-ITEM' &&
+					bufferItem.classList &&
+					bufferItem.classList.contains('footer') &&
+					(bufferItem.dataItem === cmd ||
+						!bufferItem.dataItem ||
+						bufferItem.dataItem === null)
+				) {
+					// 更宽松的条件
+
+					// 在allCommands中找到对应的info
+					for (const [lineNumber, info] of this.allCommands) {
+						if (info.element === bufferItem) {
+							const originalText = info.text
+							info.text = '结束'
+
+							break
+						}
+					}
+					break // 只有一个footer
+				}
+			}
+		} else {
+		}
+	}
+
+	// 处理if命令的分支显示
+	processIfCommand(cmd, sortedCommands, cmdIndex) {
+		const branches = cmd.params.branches
+
+		// 直接通过命令的buffer查找选项元素
+		if (cmd.buffer && Array.isArray(cmd.buffer)) {
+			let branchIndex = 0
+			// 遍历buffer，只处理直接的command-item.option元素
+			for (
+				let i = 0;
+				i < cmd.buffer.length && branchIndex < branches.length;
+				i++
+			) {
+				const bufferItem = cmd.buffer[i]
+
+				// 跳过数组元素（嵌套命令）
+				if (Array.isArray(bufferItem)) {
+					continue
+				}
+
+				// 检查是否是选项元素
+				if (
+					bufferItem &&
+					bufferItem.tagName === 'COMMAND-ITEM' &&
+					bufferItem.classList &&
+					bufferItem.classList.contains('option')
+				) {
+					// 更宽松的条件
+					if (
+						bufferItem.dataItem === cmd ||
+						!bufferItem.dataItem ||
+						bufferItem.dataItem === null
+					) {
+						// option显示从第1个分支开始（跳过第0个分支，因为header已经显示了）
+						const actualBranchIndex = branchIndex + 1
+
+						if (actualBranchIndex < branches.length) {
+							const branch = branches[actualBranchIndex]
+
+							// 尝试使用Command.parse解析if命令来获取正确的文本
+							let conditionText = ''
+							try {
+								const contents = Command.parse(cmd, this.varMap)
+
+								// 查找对应分支的内容
+								for (let i = 0; i < contents.length; i++) {
+									const content = contents[i]
+									if (
+										content.text &&
+										i === actualBranchIndex + 1
+									) {
+										// +1因为第0个是header
+										conditionText = content.text
+										break
+									}
+								}
+							} catch (error) {
+								conditionText = this.parseIfConditions(
+									branch,
+									actualBranchIndex,
+									branches.length
+								)
+							}
+
+							if (!conditionText) {
+								conditionText = this.parseIfConditions(
+									branch,
+									actualBranchIndex,
+									branches.length
+								)
+							}
+
+							// 在allCommands中找到对应的info
+							for (const [lineNumber, info] of this.allCommands) {
+								if (info.element === bufferItem) {
+									const originalText = info.text
+									info.text = conditionText
+
+									break
+								}
+							}
+						} else {
+						}
+
+						branchIndex++
+					}
+				}
+			}
+
+			// 处理footer元素，显示"结束"
+			for (let i = 0; i < cmd.buffer.length; i++) {
+				const bufferItem = cmd.buffer[i]
+
+				// 跳过数组元素
+				if (Array.isArray(bufferItem)) continue
+
+				// 检查是否是footer元素
+				if (
+					bufferItem &&
+					bufferItem.tagName === 'COMMAND-ITEM' &&
+					bufferItem.classList &&
+					bufferItem.classList.contains('footer') &&
+					(bufferItem.dataItem === cmd ||
+						!bufferItem.dataItem ||
+						bufferItem.dataItem === null)
+				) {
+					// 在allCommands中找到对应的info
+					for (const [lineNumber, info] of this.allCommands) {
+						if (info.element === bufferItem) {
+							const originalText = info.text
+							info.text = '结束'
+
+							break
+						}
+					}
+					break // 只有一个footer
+				}
+			}
+		} else {
+		}
+	}
+
+	// 解析if条件生成可读文本
+	parseIfConditions(branch, branchIndex, totalBranches) {
+		// 如果是最后一个分支且没有条件，可能是else分支
+		if (
+			branchIndex === totalBranches - 1 &&
+			(!branch.conditions || branch.conditions.length === 0)
+		) {
+			return '否则'
+		}
+
+		// 对于option显示，需要添加"否则如果"前缀（branchIndex > 0时）
+		const prefix = branchIndex > 0 ? '否则如果 ' : ''
+
+		if (!branch.conditions || branch.conditions.length === 0) {
+			return prefix ? prefix.trim() : '无条件'
+		}
+
+		// 尝试从branch的commands中获取正确的文本
+		// 如果branch有commands且第一个元素包含解析后的内容
+		if (branch.commands && branch.commands.length > 0) {
+		}
+
+		// 解析条件
+		const conditionTexts = []
+		for (const condition of branch.conditions) {
+			const conditionText = this.parseCondition(condition)
+			if (conditionText) {
+				conditionTexts.push(conditionText)
+			}
+		}
+
+		if (conditionTexts.length > 0) {
+			const conditionsStr = conditionTexts.join(' 且 ')
+			return prefix + conditionsStr
+		}
+
+		return prefix ? prefix.trim() : '无条件'
+	}
+
+	// 解析单个条件
+	parseCondition(condition) {
+		if (!condition) return ''
+
+		// 获取变量名
+		const variableName = condition.variable?.key || '未知变量'
+
+		// 获取操作符，使用符号形式
+		const operationMap = {
+			equal: '==',
+			notEqual: '!=',
+			unequal: '!=', // 添加unequal的映射
+			greater: '>',
+			greaterOrEqual: '>=',
+			less: '<',
+			lessOrEqual: '<='
+		}
+		const operation =
+			operationMap[condition.operation] || condition.operation
+
+		// 获取操作数
+		let operandText = ''
+		if (condition.operand) {
+			if (condition.operand.type === 'constant') {
+				const value = condition.operand.value
+				// 处理布尔值
+				if (typeof value === 'boolean') {
+					operandText = value ? 'true' : 'false'
+				} else {
+					operandText = String(value)
+				}
+			} else if (
+				condition.operand.type === 'variable' &&
+				condition.operand.variable
+			) {
+				operandText = condition.operand.variable.key || '未知变量'
+			}
+		}
+
+		return `${variableName} ${operation} ${operandText}`
+	}
+
+	// Create items for the command list
 	createItems(commands, indent, parent = null) {
 		const elements = this.elements
 		const length = commands.length
+
 		for (let i = 0; i < length; i++) {
 			const buffer = this.createCommandBuffer(commands, i, indent, parent)
+
+			// Assign expanded line number to the first element
+			const expandedLine = this.currentExpandedLine++
+			this.expandedLineNumbers.set(buffer[0], expandedLine)
+
+			const command = commands[i]
+
+			// 收集第一个元素的信息
+			this.collectCommandInfo(buffer[0], expandedLine)
+
+			// 检查是否需要高亮这一行
+			if (
+				this.highlightTargetLine !== undefined &&
+				expandedLine === this.highlightTargetLine
+			) {
+				setTimeout(() => {
+					// 如果有搜索词，直接高亮文本
+					if (this.currentSearchTerm) {
+						// 再等一下确保内容加载
+						setTimeout(() => {
+							if (
+								buffer[0].textContent &&
+								buffer[0].textContent.includes(
+									this.currentSearchTerm
+								)
+							) {
+								this.highlightTextInElement(
+									buffer[0],
+									this.currentSearchTerm
+								)
+							}
+						}, 100)
+					} else {
+						this.highlightElement(buffer[0])
+					}
+					if (this.highlightTargetLine === expandedLine) {
+						this.highlightTargetLine = undefined
+					}
+				}, 200)
+			}
+
 			if (buffer[0].dataItem?.folded) {
+				// Folded command: only show the first element
 				elements[elements.count++] = buffer[0]
-				this.createFoldedCommandBuffer(buffer, indent + 1, commands[i])
+
+				// 检查新创建的折叠元素是否需要高亮
+				if (this.currentSearchTerm && buffer[0].textContent) {
+					setTimeout(() => {
+						if (
+							buffer[0].textContent.includes(
+								this.currentSearchTerm
+							)
+						) {
+							this.highlightTextInElement(
+								buffer[0],
+								this.currentSearchTerm
+							)
+						}
+					}, 50)
+				}
+
+				// Count folded items to increment line counter
+				this.countFoldedItems(buffer, indent + 1, commands[i])
 				continue
 			}
+
+			// Unfolded command: process all elements in buffer
+			let isFirst = true
 			for (const target of buffer) {
 				if (target instanceof HTMLElement) {
+					if (!isFirst) {
+						// Extra HTML elements also need line numbers
+						const extraLine = this.currentExpandedLine++
+						this.expandedLineNumbers.set(target, extraLine)
+						// 收集额外元素的信息（如 else, end）
+						this.collectCommandInfo(target, extraLine)
+
+						// 检查是否需要高亮这一行
+						if (
+							this.highlightTargetLine !== undefined &&
+							extraLine === this.highlightTargetLine
+						) {
+							setTimeout(() => {
+								// 如果有搜索词，直接高亮文本
+								if (this.currentSearchTerm) {
+									// 再等一下确保内容加载
+									setTimeout(() => {
+										if (
+											target.textContent &&
+											target.textContent.includes(
+												this.currentSearchTerm
+											)
+										) {
+											this.highlightTextInElement(
+												target,
+												this.currentSearchTerm
+											)
+										}
+									}, 100)
+								} else {
+									this.highlightElement(target)
+								}
+								if (this.highlightTargetLine === extraLine) {
+									this.highlightTargetLine = undefined
+								}
+							}, 200)
+						}
+					}
+					isFirst = false
 					elements[elements.count++] = target
+
+					// 检查新创建的展开元素是否需要高亮
+					if (this.currentSearchTerm && target.textContent) {
+						setTimeout(() => {
+							if (
+								target.textContent.includes(
+									this.currentSearchTerm
+								)
+							) {
+								this.highlightTextInElement(
+									target,
+									this.currentSearchTerm
+								)
+							}
+						}, 50)
+					}
+
 					continue
 				}
 				if (target instanceof Array) {
@@ -10190,13 +11165,28 @@ class CommandList extends HTMLElement {
 			}
 		}
 
-		// 创建空项目
-		elements[elements.count++] = this.createBlankElement(
+		// Create blank element
+		const blankElement = this.createBlankElement(
 			commands,
 			length,
 			indent,
 			parent
 		)
+		const blankLine = this.currentExpandedLine++
+		this.expandedLineNumbers.set(blankElement, blankLine)
+		elements[elements.count++] = blankElement
+
+		// 收集空白行信息
+		if (this.allCommands) {
+			this.allCommands.set(blankLine, {
+				element: blankElement,
+				command: null,
+				text: '(空白)',
+				indent: indent,
+				folded: false,
+				lineNumber: blankLine
+			})
+		}
 	}
 
 	// 创建指令缓冲区
@@ -10227,6 +11217,39 @@ class CommandList extends HTMLElement {
 			li.dataIndex = index
 			li.dataIndent = indent
 			buffer.push(li)
+
+			// 检查是否需要高亮这个元素
+			if (
+				this.pendingHighlightLine !== null &&
+				this.pendingHighlightLine !== undefined
+			) {
+				const elementLine = this.expandedLineNumbers.get(li)
+				if (elementLine === this.pendingHighlightLine) {
+					// 延迟高亮，等待元素添加到DOM
+					setTimeout(() => {
+						// 如果有搜索词，直接高亮文本
+						if (this.currentSearchTerm) {
+							// 再等一下确保内容加载
+							setTimeout(() => {
+								if (
+									li.textContent &&
+									li.textContent.includes(
+										this.currentSearchTerm
+									)
+								) {
+									this.highlightTextInElement(
+										li,
+										this.currentSearchTerm
+									)
+								}
+							}, 100)
+						} else {
+							this.highlightElement(li)
+						}
+						this.pendingHighlightLine = null
+					}, 200)
+				}
+			}
 
 			// 创建内容
 			const contents = Command.parse(command, this.varMap)
@@ -10302,7 +11325,8 @@ class CommandList extends HTMLElement {
 				if (content.children !== undefined) {
 					buffer.push(content.children)
 
-					if (i < length) {
+					if (i < length - 1) {
+						// 修正条件：检查是否还有更多内容
 						li = document.createElement('command-item')
 						li.contents = []
 						li.dataKey = false
@@ -10310,6 +11334,7 @@ class CommandList extends HTMLElement {
 						li.dataItem = command
 						li.dataIndex = index
 						li.dataIndent = indent
+						li.isSpecialElement = true // 标记为特殊元素（如 else, end）
 						buffer.push(li)
 						continue
 					}
@@ -10388,8 +11413,1792 @@ class CommandList extends HTMLElement {
 		return buffer
 	}
 
+	// 搜索所有命令（包括折叠的）
+	searchAllCommands(keyword) {
+		const results = []
+
+		// 使用已收集的命令信息
+		if (!this.allCommands || this.allCommands.size === 0) {
+			return results
+		}
+
+		// 搜索匹配的命令
+		for (const [lineIndex, info] of this.allCommands) {
+			if (info.text && info.text.includes(keyword)) {
+				results.push({
+					line: info.lineNumber,
+					text: info.text,
+					indent: info.indent,
+					visible: !info.folded,
+					folded: info.folded,
+					element: info.element,
+					command: info.command
+				})
+			}
+		}
+
+		return results
+	}
+
+	searchText(searchTerm) {
+		if (
+			!searchTerm ||
+			typeof searchTerm !== 'string' ||
+			searchTerm.trim() === ''
+		) {
+			this.clearAllHighlights()
+			this.currentSearchTerm = null
+			this.searchMatches = null
+			this.currentMatchIndex = -1
+			this.keyboardSelectedIndex = -1
+			if (window.updateSearchCounter) {
+				window.updateSearchCounter(-1, 0, '')
+			}
+			return
+		}
+
+		// 检查是否是导航命令 (例如: "k w" = 上一个, "k s" = 下一个)
+		const navMatch = searchTerm.match(/^(.+?)\s+(w|s)$/)
+		if (navMatch) {
+			const [, searchWord, direction] = navMatch
+			if (direction === 'w') {
+				this.navigateToPrevMatch(searchWord)
+			} else if (direction === 's') {
+				this.navigateToNextMatch(searchWord)
+			}
+			return
+		}
+
+		// 检查是否是跳转到第N个匹配项的格式 (例如: "k 2")
+		const jumpMatch = searchTerm.match(/^(.+?)\s+(\d+)$/)
+		if (jumpMatch) {
+			const [, searchWord, jumpIndex] = jumpMatch
+			this.jumpToNthMatch(searchWord, parseInt(jumpIndex))
+			return
+		}
+
+		const term = searchTerm
+
+		// 清除旧高光和状态
+		this.clearAllHighlights()
+		this.currentSearchTerm = null
+		this.searchMatches = null
+		this.currentMatchIndex = -1
+		this.keyboardSelectedIndex = -1
+
+		setTimeout(() => {
+			this.validateAndCleanHighlights()
+		}, 50)
+
+		// 延迟执行新搜索，确保清除完成
+		setTimeout(() => {
+			this.performNewSearch(searchTerm, term)
+		}, 100)
+	}
+
+	performNewSearch(searchTerm, term) {
+		this.currentSearchTerm = searchTerm
+		const allMatches = []
+
+		// 准备大小写不敏感的搜索词
+		const lowerTerm = term.toLowerCase()
+
+		// 优先使用 this.allCommands 作为主要数据源（它包含完整数据）
+
+		// 备用数据源
+		const backupDataSource = window._eventCommandsArray
+
+		// 检查其他可能的全局数据源
+		const otherSources = [
+			'_currentEventList',
+			'_displayedCommands',
+			'_visibleCommands',
+			'_searchableContent',
+			'_allCommands',
+			'_eventData'
+		]
+
+		otherSources.forEach((sourceName) => {
+			if (window[sourceName]) {
+				const source = window[sourceName]
+				const size = Array.isArray(source)
+					? source.length
+					: source.size || 'unknown'
+
+				// 如果是数组且不太大，检查是否有匹配项
+				if (Array.isArray(source) && source.length < 100) {
+					let matches = 0
+					source.forEach((item, index) => {
+						const text =
+							item.text || item.content || item.toString()
+						if (typeof text === 'string' && text.includes(term)) {
+							matches++
+							if (matches <= 3) {
+							}
+						}
+					})
+					if (matches > 0) {
+					}
+				}
+			}
+		})
+
+		// 首先尝试使用 this.allCommands（完整数据源）
+		if (this.allCommands && this.allCommands.size > 0) {
+			let count = 0
+			for (const [lineIndex, info] of this.allCommands) {
+				if (count < 5) {
+					count++
+				}
+
+				// 直接搜索 text 字段（应该在数据填充时已处理特殊元素）
+				if (info.text && info.text.includes(term)) {
+					allMatches.push({
+						lineIndex: lineIndex,
+						lineNumber: lineIndex, // 统一使用0-based系统
+						text: info.text,
+						folded: info.folded,
+						source: 'allCommands'
+					})
+				}
+			}
+		} else if (Array.isArray(backupDataSource)) {
+			// 备用：使用 _eventCommandsArray
+			for (let i = 0; i < Math.min(5, backupDataSource.length); i++) {
+				const info = backupDataSource[i]
+			}
+
+			for (let i = 0; i < backupDataSource.length; i++) {
+				const info = backupDataSource[i]
+
+				// 直接搜索 text 字段
+				if (info.text && info.text.includes(term)) {
+					allMatches.push({
+						lineIndex: i,
+						lineNumber: i, // 统一使用0-based系统
+						text: info.text,
+						folded: info.folded,
+						source: 'backup'
+					})
+				}
+			}
+		} else {
+		}
+
+		// DOM搜索仅作为诊断和备用参考（不影响主搜索结果）
+		const domMatches = []
+		const commandItems = this.querySelectorAll('command-item')
+
+		commandItems.forEach((element, index) => {
+			if (element.textContent && element.textContent.includes(term)) {
+				const text = element.textContent.trim()
+				domMatches.push({
+					lineIndex: index,
+					text: text.substring(0, 100)
+				})
+			}
+		})
+
+		if (domMatches.length > 0) {
+			domMatches.forEach((match, index) => {})
+		}
+
+		// 搜索结果汇总
+
+		// 最终使用数据驱动的搜索结果（不再依赖DOM）
+
+		this.searchMatches = allMatches
+		this.currentMatchIndex = -1
+		this.keyboardSelectedIndex = -1
+
+		// 智能检测当前项
+		const initialIndex = window.determineCurrentSearchItem
+			? determineCurrentSearchItem(allMatches)
+			: -1
+		this.keyboardSelectedIndex = initialIndex
+
+		// 立即应用红色高亮到当前项
+		setTimeout(() => {
+			this.refreshAllHighlights()
+		}, 50)
+
+		// 检测并处理折叠的匹配项 - 加强版保险机制
+		const foldedMatches = allMatches.filter((m) => m.folded)
+		let hasAutoExpanded = false
+
+		if (foldedMatches.length > 0) {
+			hasAutoExpanded = true
+
+			const savedTerm = this.currentSearchTerm
+			this.currentSearchTerm = null
+
+			// 展开所有折叠的匹配项
+			foldedMatches.forEach((match) => {
+				if (match.lineNumber) {
+					this.jumpToLine(match.lineNumber + 1)
+				}
+			})
+
+			this.currentSearchTerm = savedTerm
+
+			// 计算展开前可见的匹配项数量
+			const originalVisibleCount = allMatches.filter(
+				(m) => !m.folded
+			).length
+
+			// 展开后重新搜索以获取准确的可见匹配数
+			setTimeout(() => {
+				this.refreshSearchAfterExpand(
+					searchTerm,
+					originalVisibleCount,
+					hasAutoExpanded
+				)
+			}, 500)
+		} else {
+			// 更新计数器，只计算可见的匹配项
+			const visibleMatches = allMatches.filter((m) => !m.folded)
+			this.searchMatches = visibleMatches
+			if (window.updateSearchCounter) {
+				window.updateSearchCounter(
+					this.keyboardSelectedIndex,
+					visibleMatches.length,
+					searchTerm,
+					hasAutoExpanded,
+					0
+				)
+			}
+		}
+
+		// 高亮匹配文本 - 多次重试确保完整性
+		setTimeout(() => {
+			const elements = this.querySelectorAll('command-item')
+
+			for (const element of elements) {
+				if (element.textContent && element.textContent.includes(term)) {
+					this.highlightTextInElement(element, term)
+				}
+			}
+
+			// 立即尝试应用红色高亮
+			setTimeout(() => {
+				this.refreshAllHighlights()
+			}, 100)
+		}, 300)
+
+		// 额外重试，处理延迟渲染的元素
+		setTimeout(() => {
+			this.highlightVisibleMatches()
+			// 再次尝试红色高亮
+			setTimeout(() => {
+				this.refreshAllHighlights()
+			}, 50)
+		}, 600)
+
+		setTimeout(() => {
+			this.highlightVisibleMatches()
+			// 最后一次确保红色高亮
+			this.refreshAllHighlights()
+
+			// 最终安全检查：确保没有遗漏的折叠匹配项
+			if (!hasAutoExpanded && this.currentSearchTerm) {
+				this.performFoldedMatchSecurityCheck(this.currentSearchTerm)
+			}
+		}, 1000)
+	}
+
+	// 跳转到第N个匹配项
+	jumpToNthMatch(searchWord, index) {
+		const term = searchWord
+
+		// 如果没有之前的搜索结果，重新搜索
+		if (!this.searchMatches || this.currentSearchTerm !== term) {
+			this.searchText(searchWord)
+			setTimeout(() => {
+				this.jumpToNthMatch(searchWord, index)
+			}, 1000)
+			return
+		}
+
+		if (index < 1 || index > this.searchMatches.length) {
+			return
+		}
+
+		const targetMatch = this.searchMatches[index - 1]
+
+		this.currentMatchIndex = index - 1
+		this.keyboardSelectedIndex = this.currentMatchIndex
+
+		if (window.updateSearchCounter) {
+			window.updateSearchCounter(
+				this.keyboardSelectedIndex,
+				this.searchMatches.length,
+				this.currentSearchTerm
+			)
+		}
+
+		// 展开折叠内容
+		const savedTerm = this.currentSearchTerm
+		this.currentSearchTerm = null
+
+		this.jumpToLine(targetMatch.lineNumber + 1)
+
+		// 恢复搜索词
+		this.currentSearchTerm = savedTerm
+
+		// 滚动到目标位置
+		setTimeout(() => {
+			this.scrollToTargetLine(targetMatch.lineNumber, true)
+		}, 500)
+
+		// 滚动完成后更新高亮状态（确保目标元素已渲染）
+		setTimeout(() => {
+			this.refreshAllHighlights()
+		}, 1000)
+
+		// 删除了"已跳转到第X个匹配项"的提示显示
+	}
+
+	// 导航到上一个匹配项
+	navigateToPrevMatch(searchWord) {
+		if (!searchWord || typeof searchWord !== 'string') {
+			return
+		}
+		const term = searchWord
+
+		if (!this.searchMatches || this.currentSearchTerm !== term) {
+			this.searchText(searchWord)
+			setTimeout(() => {
+				if (this.searchMatches && this.searchMatches.length > 0) {
+					this.jumpToNthMatch(searchWord, this.searchMatches.length)
+				}
+			}, 1000)
+			return
+		}
+
+		if (this.searchMatches.length === 0) {
+			return
+		}
+
+		let prevIndex
+		if (this.keyboardSelectedIndex <= 0) {
+			prevIndex = this.searchMatches.length
+		} else {
+			prevIndex = this.keyboardSelectedIndex
+		}
+
+		this.jumpToNthMatch(searchWord, prevIndex)
+
+		// 更新高亮状态
+		setTimeout(() => {
+			this.refreshAllHighlights()
+		}, 100)
+
+		if (window.updateSearchCounter) {
+			window.updateSearchCounter(
+				this.keyboardSelectedIndex,
+				this.searchMatches.length,
+				this.currentSearchTerm
+			)
+		}
+	}
+
+	navigateToNextMatch(searchWord) {
+		if (!searchWord || typeof searchWord !== 'string') {
+			return
+		}
+		const term = searchWord
+
+		if (!this.searchMatches || this.currentSearchTerm !== term) {
+			this.searchText(searchWord)
+			setTimeout(() => {
+				if (this.searchMatches && this.searchMatches.length > 0) {
+					this.jumpToNthMatch(searchWord, 1)
+				}
+			}, 1000)
+			return
+		}
+
+		if (this.searchMatches.length === 0) {
+			return
+		}
+
+		let nextIndex
+		if (this.keyboardSelectedIndex >= this.searchMatches.length - 1) {
+			nextIndex = 1
+		} else {
+			nextIndex = this.keyboardSelectedIndex + 2
+		}
+
+		this.jumpToNthMatch(searchWord, nextIndex)
+
+		// 更新高亮状态
+		setTimeout(() => {
+			this.refreshAllHighlights()
+		}, 100)
+
+		if (window.updateSearchCounter) {
+			window.updateSearchCounter(
+				this.keyboardSelectedIndex,
+				this.searchMatches.length,
+				this.currentSearchTerm
+			)
+		}
+	}
+
+	// 刷新搜索状态（当命令列表更新后调用）
+	refreshSearch(searchTerm, previousIndex = -1) {
+		// 检查 allCommands 是否存在
+		if (!this.allCommands || this.allCommands.size === 0) {
+			return
+		}
+
+		// 重新收集匹配项 - 按行计数，不按实例计数
+		const allMatches = []
+		const term = searchTerm
+		for (const [lineIndex, info] of this.allCommands) {
+			if (info.text.includes(term)) {
+				// Count per line, not per instance - one match per line
+				allMatches.push({
+					lineIndex: lineIndex,
+					lineNumber: lineIndex,
+					text: info.text,
+					folded: info.folded
+				})
+			}
+		}
+
+		// 更新搜索状态
+		this.searchMatches = allMatches
+
+		// 检查之前的位置是否仍然有效
+		if (previousIndex >= 0 && previousIndex < allMatches.length) {
+			this.currentMatchIndex = previousIndex
+		} else {
+			this.currentMatchIndex = -1
+			// 位置失效时重新智能检测当前项
+			const newIndex = window.determineCurrentSearchItem
+				? determineCurrentSearchItem(allMatches)
+				: -1
+			this.keyboardSelectedIndex = newIndex
+		}
+
+		// 立即清除旧的高亮
+		this.clearAllHighlights()
+
+		// 立即高亮所有可见的匹配项
+		const elements = this.querySelectorAll('command-item')
+		let highlightedCount = 0
+
+		for (const element of elements) {
+			if (element.textContent && element.textContent.includes(term)) {
+				this.highlightTextInElement(element, searchTerm)
+				highlightedCount++
+			}
+		}
+
+		// 延迟检查，确保所有元素都被处理（特别是异步渲染的元素）
+		setTimeout(() => {
+			this.highlightVisibleMatches()
+		}, 200)
+
+		setTimeout(() => {
+			this.highlightVisibleMatches()
+		}, 500)
+
+		// 更新计数器（使用快捷键选择索引）
+		if (window.updateSearchCounter) {
+			window.updateSearchCounter(
+				this.keyboardSelectedIndex,
+				allMatches.length,
+				searchTerm
+			)
+		}
+	}
+
+	// 展开折叠后刷新搜索结果
+	refreshSearchAfterExpand(searchTerm, originalCount, hasAutoExpanded) {
+		// 直接重新收集匹配项，避免递归调用 performNewSearch
+		const allMatches = []
+		const term = searchTerm
+		const dataSource = window._eventCommandsArray
+
+		if (Array.isArray(dataSource)) {
+			for (let i = 0; i < dataSource.length; i++) {
+				const info = dataSource[i]
+				if (info.text && info.text.includes(term)) {
+					allMatches.push({
+						lineIndex: i,
+						lineNumber: info.lineNumber,
+						text: info.text,
+						folded: info.folded,
+						source: 'data'
+					})
+				}
+			}
+		}
+
+		// 更新所有匹配项的折叠状态（因为展开操作后状态可能已改变）
+		for (const match of allMatches) {
+			if (match.lineIndex < dataSource.length) {
+				const info = dataSource[match.lineIndex]
+				match.folded = info.folded || false
+			}
+		}
+
+		// 只保留非折叠的匹配项，确保计数的一致性
+		const visibleMatches = allMatches.filter((match) => !match.folded)
+
+		this.searchMatches = visibleMatches
+		const expandedCount = Math.max(0, visibleMatches.length - originalCount)
+
+		// 更新计数器，显示展开信息
+		if (window.updateSearchCounter) {
+			window.updateSearchCounter(
+				this.keyboardSelectedIndex,
+				visibleMatches.length,
+				searchTerm,
+				hasAutoExpanded,
+				expandedCount
+			)
+		}
+
+		// 立即高亮新的匹配项
+		setTimeout(() => {
+			this.highlightVisibleMatches()
+
+			// 额外的保险检查：确认是否还有隐藏的折叠匹配
+			this.performFoldedMatchSecurityCheck(searchTerm)
+		}, 100)
+	}
+
+	// 折叠匹配安全检查 - 额外保险机制
+	performFoldedMatchSecurityCheck(searchTerm) {
+		if (!searchTerm || !this.allCommands) return
+
+		const term = searchTerm
+		let hiddenFoldedCount = 0
+		let foldedCommands = []
+
+		// 检查 allCommands 中是否还有折叠的匹配项
+		for (const [lineIndex, info] of this.allCommands) {
+			if (info.folded && info.text && info.text.includes(term)) {
+				hiddenFoldedCount++
+				foldedCommands.push(info)
+			}
+		}
+
+		if (hiddenFoldedCount > 0) {
+			// 强制展开所有发现的折叠命令
+			foldedCommands.forEach((info) => {
+				if (info.command && info.command.folded) {
+					try {
+						this.unfoldCommand(info.command)
+					} catch (e) {}
+				}
+			})
+
+			// 如果成功展开了一些内容，再次刷新
+			if (hiddenFoldedCount > 0) {
+				setTimeout(() => {
+					this.refreshSearchAfterExpand(
+						searchTerm,
+						this.searchMatches?.length || 0,
+						true
+					)
+				}, 300)
+			}
+		}
+	}
+
+	// 高亮当前可见的匹配元素（用于滚动时）
+	highlightVisibleMatches() {
+		if (!this.currentSearchTerm) return
+
+		const elements = this.querySelectorAll('command-item')
+		const searchTerm = this.currentSearchTerm
+
+		// 获取当前选中项信息
+		let targetLineNumber = null
+		let targetElementText = null
+		if (
+			this.searchMatches &&
+			this.keyboardSelectedIndex >= 0 &&
+			this.keyboardSelectedIndex < this.searchMatches.length
+		) {
+			const targetMatch = this.searchMatches[this.keyboardSelectedIndex]
+			targetLineNumber = targetMatch.lineNumber
+			targetElementText = targetMatch.text.trim().replace(/\s+/g, ' ')
+		}
+
+		let foundTarget = false
+		for (const element of elements) {
+			if (
+				element.textContent &&
+				element.textContent.includes(searchTerm)
+			) {
+				// 更健壮的高亮检查 - 检查是否有匹配的mark元素
+				const existingMarks = element.querySelectorAll('mark')
+				let hasValidHighlight = false
+
+				// 检查现有高亮是否匹配当前搜索词
+				for (const mark of existingMarks) {
+					if (
+						mark.textContent &&
+						mark.textContent.includes(searchTerm)
+					) {
+						hasValidHighlight = true
+						break
+					}
+				}
+
+				// 如果没有有效高亮，重新高亮
+				if (!hasValidHighlight) {
+					// 判断是否为当前项
+					const elementLineNumber =
+						this.expandedLineNumbers.get(element)
+					const elementText = element.textContent
+						.trim()
+						.replace(/\s+/g, ' ')
+
+					let isCurrent = false
+					// 现在都使用0-based系统，直接比较
+					if (
+						targetLineNumber !== null &&
+						elementLineNumber === targetLineNumber
+					) {
+						isCurrent = true
+						foundTarget = true
+					} else if (
+						targetElementText &&
+						elementText.includes(targetElementText) &&
+						!foundTarget
+					) {
+						isCurrent = true
+						foundTarget = true
+					}
+
+					// 先清除该元素的旧高亮
+					this.clearHighlightsInElement(element)
+					// 重新应用高亮（带当前项状态）
+					this.highlightTextInElement(
+						element,
+						this.currentSearchTerm,
+						isCurrent
+					)
+				}
+			}
+		}
+	}
+
+	// 高亮所有可见元素中的搜索文本
+	highlightSearchText(term) {
+		if (!term) return
+
+		const elements = this.querySelectorAll('command-item')
+
+		for (const element of elements) {
+			// 检查元素是否包含搜索词
+			if (element.textContent && element.textContent.includes(term)) {
+				// 高亮文本中的匹配部分
+				this.highlightTextInElement(element, term)
+			}
+		}
+	}
+
+	// 在元素中高亮文本
+	highlightTextInElement(element, term, isCurrent = false) {
+		const walker = document.createTreeWalker(
+			element,
+			NodeFilter.SHOW_TEXT,
+			{
+				acceptNode: function (node) {
+					if (!node.textContent.trim())
+						return NodeFilter.FILTER_REJECT
+					if (
+						node.parentElement &&
+						node.parentElement.tagName === 'MARK'
+					)
+						return NodeFilter.FILTER_REJECT
+					return NodeFilter.FILTER_ACCEPT
+				}
+			}
+		)
+
+		const nodesToReplace = []
+		let node
+
+		while ((node = walker.nextNode())) {
+			const text = node.textContent
+
+			if (text.includes(term)) {
+				nodesToReplace.push({
+					node: node,
+					parent: node.parentNode
+				})
+			}
+		}
+
+		// 替换文本节点为高亮版本
+		nodesToReplace.forEach((item) => {
+			// 再次确认当前搜索状态是否有效，防止在处理过程中搜索被清除
+			if (
+				!this.currentSearchTerm ||
+				this.currentSearchTerm.trim() === ''
+			) {
+				return
+			}
+
+			const text = item.node.textContent
+			const regex = new RegExp(
+				term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+				'g'
+			)
+			const markClass = isCurrent ? 'current-match' : ''
+			const highlightedHTML = text.replace(
+				regex,
+				`<mark class="${markClass}">$&</mark>`
+			)
+
+			const span = document.createElement('span')
+			span.innerHTML = highlightedHTML
+
+			// 添加搜索标识，方便后续清除
+			span.setAttribute('data-search-highlight', 'true')
+			span.setAttribute('data-search-term', this.currentSearchTerm)
+
+			try {
+				item.parent.replaceChild(span, item.node)
+			} catch (e) {}
+		})
+	}
+
+	// 更新当前选中项的高亮状态
+	updateCurrentMatchHighlight() {
+		if (
+			!this.currentSearchTerm ||
+			!this.searchMatches ||
+			this.keyboardSelectedIndex < 0
+		)
+			return
+
+		// 先清除所有当前高亮标记
+		const currentMarks = document.querySelectorAll('mark.current-match')
+		currentMarks.forEach((mark) => {
+			mark.classList.remove('current-match')
+		})
+
+		// 获取当前选中的匹配项
+		const currentMatch = this.searchMatches[this.keyboardSelectedIndex]
+		if (!currentMatch) return
+
+		// 找到对应的元素并高亮
+		const elements = this.querySelectorAll('command-item')
+		for (const element of elements) {
+			const elementLine = this.expandedLineNumbers.get(element)
+			// 现在都使用0-based系统，直接比较
+			if (elementLine === currentMatch.lineNumber) {
+				// 先清除该元素的所有高亮
+				this.clearHighlightsInElement(element)
+				// 重新高亮，标记为当前项
+				this.highlightTextInElement(
+					element,
+					this.currentSearchTerm,
+					true
+				)
+				break
+			}
+		}
+	}
+
+	// 重新高亮所有匹配项（当前项特殊标记）
+	refreshAllHighlights(skipAutoScroll = false) {
+		if (!this.currentSearchTerm) return
+
+		// 强制清除所有红色高亮
+		const allCurrentMarks = document.querySelectorAll('mark.current-match')
+		allCurrentMarks.forEach((mark) => {
+			mark.classList.remove('current-match')
+		})
+
+		const elements = this.querySelectorAll('command-item')
+		const term = this.currentSearchTerm
+
+		// 收集当前可见的所有匹配元素
+		const visibleMatches = []
+		for (const element of elements) {
+			if (element.textContent && element.textContent.includes(term)) {
+				visibleMatches.push(element)
+			}
+		}
+
+		// 列出所有可见匹配元素
+		visibleMatches.forEach((element, index) => {
+			const lineNumber = this.expandedLineNumbers.get(element)
+		})
+
+		// 找出应该显示红色的元素（基于searchMatches索引）
+		let targetLineNumber = null
+		let targetElementText = null
+		if (
+			this.searchMatches &&
+			this.keyboardSelectedIndex >= 0 &&
+			this.keyboardSelectedIndex < this.searchMatches.length
+		) {
+			const targetMatch = this.searchMatches[this.keyboardSelectedIndex]
+			targetLineNumber = targetMatch.lineNumber
+			// 标准化文本：去除首尾空格，压缩多个空格为单个空格
+			targetElementText = targetMatch.text.trim().replace(/\s+/g, ' ')
+		}
+
+		// 对所有匹配元素进行高亮 - 确保只有一个元素被标记为当前项
+		let foundTarget = false
+
+		// 调试：显示expandedLineNumbers映射
+		const allElements = this.querySelectorAll('command-item')
+		allElements.forEach((el, domIndex) => {
+			const expandedLine = this.expandedLineNumbers.get(el)
+			const text = el.textContent.trim().substring(0, 20)
+		})
+
+		for (let i = 0; i < visibleMatches.length; i++) {
+			const element = visibleMatches[i]
+			// 获取元素的行号
+			const elementLineNumber = this.expandedLineNumbers.get(element)
+			// 标准化可见元素文本
+			const elementText = element.textContent.trim().replace(/\s+/g, ' ')
+
+			// 判断是否为目标元素 - 严格确保只有一个元素被标记为当前项
+			let isCurrent = false
+
+			// 如果还没有找到目标，进行匹配判断
+			if (!foundTarget) {
+				// 严格使用行号匹配，避免文本误匹配
+				if (
+					targetLineNumber !== null &&
+					elementLineNumber === targetLineNumber
+				) {
+					isCurrent = true
+					foundTarget = true
+				} else {
+				}
+			} else {
+			}
+
+			// 清除旧高亮
+			this.clearHighlightsInElement(element)
+			// 应用新高亮
+			this.highlightTextInElement(element, term, isCurrent)
+		}
+
+		// 如果目标元素不可见，说明需要滚动
+		if (targetElementText && !foundTarget && !skipAutoScroll) {
+			// 尝试滚动到目标位置
+			if (this.searchMatches && this.keyboardSelectedIndex >= 0) {
+				const targetMatch =
+					this.searchMatches[this.keyboardSelectedIndex]
+
+				// 延迟滚动，确保当前高亮完成
+				setTimeout(() => {
+					this.scrollToTargetLine(targetMatch.lineNumber, true)
+
+					// 滚动后重新尝试高亮（跳过自动滚动防止循环）
+					setTimeout(() => {
+						this.refreshAllHighlights(true)
+					}, 500)
+				}, 100)
+			}
+		}
+	}
+
+	clearAllHighlights() {
+		this.clearHighlightsInElement(this)
+		this.clearHighlightsInElement(document)
+
+		const containers = document.querySelectorAll(
+			'command-list, command-item, .command-content, .event-content'
+		)
+		containers.forEach((container) => {
+			this.clearHighlightsInElement(container)
+		})
+
+		this.forceRemoveAllHighlights()
+		this.bruteForceRemoveHighlights()
+		this.ultimateHighlightRemover()
+
+		if (window.forceRemoveAllMarks) {
+			setTimeout(() => {
+				window.forceRemoveAllMarks()
+			}, 50)
+		}
+
+		setTimeout(() => {
+			this.validateAndCleanHighlights()
+		}, 200)
+	}
+
+	// 强制移除所有可能的高亮元素
+	forceRemoveAllHighlights() {
+		try {
+			// 只在命令列表容器内搜索mark元素，避免影响主界面
+			const commandList = document.querySelector('command-list')
+			if (!commandList) return
+
+			let allMarks = commandList.querySelectorAll('mark')
+
+			// 转换为数组以避免动态NodeList问题
+			const marksArray = Array.from(allMarks)
+
+			marksArray.forEach((mark) => {
+				try {
+					const parent = mark.parentNode
+					const text = mark.textContent || ''
+
+					if (parent) {
+						// 尝试替换
+						try {
+							const textNode = document.createTextNode(text)
+							parent.replaceChild(textNode, mark)
+							parent.normalize()
+						} catch (e1) {
+							// 如果替换失败，尝试移除后插入文本
+							try {
+								const nextSibling = mark.nextSibling
+								mark.remove()
+								const textNode = document.createTextNode(text)
+								if (nextSibling) {
+									parent.insertBefore(textNode, nextSibling)
+								} else {
+									parent.appendChild(textNode)
+								}
+								parent.normalize()
+							} catch (e2) {
+								// 最后手段 - 直接删除
+								try {
+									mark.remove()
+								} catch (e3) {}
+							}
+						}
+					} else {
+						// 没有父节点，直接删除
+						try {
+							mark.remove()
+						} catch (e) {}
+					}
+				} catch (e) {}
+			})
+
+			// 再次检查是否还有mark元素
+			const remainingMarks = commandList.querySelectorAll('mark')
+			if (remainingMarks.length > 0) {
+				remainingMarks.forEach((mark) => {
+					try {
+						mark.outerHTML = mark.textContent || ''
+					} catch (e) {}
+				})
+			}
+
+			// 在命令列表容器内搜索所有包含黄色背景的元素
+			const yellowElements = commandList.querySelectorAll(
+				'[style*="background-color"], [style*="background"]'
+			)
+			yellowElements.forEach((el) => {
+				const style = el.getAttribute('style') || ''
+
+				// 更宽泛的检查条件
+				if (
+					style.includes('#ffff00') ||
+					style.includes('yellow') ||
+					style.includes('rgb(255, 255, 0)') ||
+					style.includes('background-color: #ffff00') ||
+					style.includes('background-color:#ffff00') ||
+					style.includes('background: #ffff00') ||
+					style.includes('background:#ffff00')
+				) {
+					try {
+						// 彻底清除所有背景相关样式
+						el.style.backgroundColor = ''
+						el.style.background = ''
+						el.style.backgroundImage = ''
+						el.style.backgroundRepeat = ''
+						el.style.backgroundPosition = ''
+						el.style.backgroundSize = ''
+						el.removeAttribute('style')
+					} catch (e) {}
+				}
+			})
+
+			// 清除所有搜索相关的CSS类
+			const searchElements = commandList.querySelectorAll(
+				'.search-match, .search-highlight'
+			)
+			searchElements.forEach((el) => {
+				try {
+					el.classList.remove('search-match', 'search-highlight')
+					el.style.backgroundColor = ''
+					el.style.border = ''
+					el.style.boxShadow = ''
+				} catch (e) {}
+			})
+
+			// 清除带有搜索标识的元素
+			const searchHighlightElements = commandList.querySelectorAll(
+				'[data-search-highlight="true"]'
+			)
+			searchHighlightElements.forEach((el) => {
+				try {
+					const parent = el.parentNode
+					if (parent && el.textContent) {
+						const textNode = document.createTextNode(el.textContent)
+						parent.replaceChild(textNode, el)
+						parent.normalize()
+					}
+				} catch (e) {}
+			})
+		} catch (e) {}
+	}
+
+	// 暴力清除：直接扫描所有元素
+	bruteForceRemoveHighlights() {
+		try {
+			// 只清理命令列表容器内的元素，避免影响主界面
+			const commandList = document.querySelector('command-list')
+			if (!commandList) return
+
+			const allElements = commandList.querySelectorAll('*')
+
+			allElements.forEach((el) => {
+				try {
+					// 检查元素的样式
+					if (el.style) {
+						const bgColor = el.style.backgroundColor
+						const bg = el.style.background
+
+						if (
+							bgColor &&
+							(bgColor.includes('#ffff00') ||
+								bgColor.includes('yellow') ||
+								bgColor.includes('rgb(255, 255, 0)'))
+						) {
+							el.style.backgroundColor = ''
+						}
+
+						if (
+							bg &&
+							(bg.includes('#ffff00') ||
+								bg.includes('yellow') ||
+								bg.includes('rgb(255, 255, 0)'))
+						) {
+							el.style.background = ''
+						}
+					}
+
+					// 检查style属性
+					const styleAttr = el.getAttribute('style')
+					if (
+						styleAttr &&
+						(styleAttr.includes('#ffff00') ||
+							styleAttr.includes('yellow'))
+					) {
+						// 重新设置style属性，过滤掉黄色背景
+						const newStyle = styleAttr.replace(
+							/background[^;]*[#ffff00|yellow][^;]*;?/gi,
+							''
+						)
+						if (newStyle !== styleAttr) {
+							el.setAttribute('style', newStyle)
+						}
+					}
+
+					// 检查类名
+					if (
+						el.classList &&
+						(el.classList.contains('search-match') ||
+							el.classList.contains('search-highlight'))
+					) {
+						el.classList.remove('search-match', 'search-highlight')
+					}
+
+					// 检查data属性
+					if (el.hasAttribute('data-search-highlight')) {
+						el.removeAttribute('data-search-highlight')
+						el.removeAttribute('data-search-term')
+					}
+
+					// 如果是mark元素，直接替换
+					if (el.tagName === 'MARK') {
+						const parent = el.parentNode
+						if (parent) {
+							const textNode = document.createTextNode(
+								el.textContent || ''
+							)
+							parent.replaceChild(textNode, el)
+							parent.normalize()
+						}
+					}
+				} catch (e) {}
+			})
+		} catch (e) {}
+	}
+
+	// 终极高亮清除器：检查innerHTML和计算样式
+	ultimateHighlightRemover() {
+		try {
+			// 只清理命令列表容器内的元素，避免影响主界面
+			const commandList = document.querySelector('command-list')
+			if (!commandList) return
+
+			// 1. 检查所有元素的innerHTML中是否包含mark标签
+			const allElements = commandList.querySelectorAll('*')
+			let modifiedCount = 0
+
+			allElements.forEach((el) => {
+				try {
+					// 检查innerHTML中的mark标签
+					if (el.innerHTML && el.innerHTML.includes('<mark')) {
+						// 清除innerHTML中的mark标签
+						const originalHTML = el.innerHTML
+						el.innerHTML = el.innerHTML.replace(
+							/<mark[^>]*>(.*?)<\/mark>/gi,
+							'$1'
+						)
+						if (el.innerHTML !== originalHTML) {
+							modifiedCount++
+						}
+					}
+
+					// 检查计算样式
+					if (window.getComputedStyle && el.nodeType === 1) {
+						const computedStyle = window.getComputedStyle(el)
+						const bgColor = computedStyle.backgroundColor
+
+						if (
+							bgColor &&
+							(bgColor.includes('255, 255, 0') ||
+								bgColor === 'yellow' ||
+								bgColor === '#ffff00')
+						) {
+							// 强制覆盖
+							el.style.backgroundColor = 'transparent !important'
+							el.style.background = 'transparent !important'
+							modifiedCount++
+						}
+					}
+
+					// 检查是否有黄色相关的类名
+					if (el.className && typeof el.className === 'string') {
+						const classes = el.className.split(' ')
+						classes.forEach((cls) => {
+							if (
+								cls.includes('highlight') ||
+								cls.includes('search') ||
+								cls.includes('mark')
+							) {
+								el.classList.remove(cls)
+								modifiedCount++
+							}
+						})
+					}
+
+					// 检查文本内容是否被wrapped在span中
+					if (el.tagName === 'SPAN' && el.style.backgroundColor) {
+						const bgColor = el.style.backgroundColor
+						if (
+							bgColor.includes('#ffff00') ||
+							bgColor.includes('255, 255, 0') ||
+							bgColor.includes('yellow')
+						) {
+							const parent = el.parentNode
+							if (parent) {
+								const textNode = document.createTextNode(
+									el.textContent
+								)
+								parent.replaceChild(textNode, el)
+								parent.normalize()
+								modifiedCount++
+							}
+						}
+					}
+				} catch (e) {}
+			})
+
+			// 2. 强制刷新命令列表的显示
+			if (modifiedCount > 0) {
+				// 强制重新渲染
+				this.style.display = 'none'
+				this.offsetHeight // 触发重排
+				this.style.display = ''
+			}
+		} catch (e) {}
+	}
+
+	// 验证并清理不应该存在的高亮
+	validateAndCleanHighlights() {
+		try {
+			// 如果没有活跃的搜索，清除所有高亮
+			if (
+				!this.currentSearchTerm ||
+				this.currentSearchTerm.trim() === ''
+			) {
+				// 只在命令列表容器内查找高亮元素，避免影响主界面
+				const commandList = this
+				const allHighlights = [
+					...commandList.querySelectorAll('mark'),
+					...commandList.querySelectorAll(
+						'[data-search-highlight="true"]'
+					),
+					...commandList.querySelectorAll('.search-match'),
+					...commandList.querySelectorAll('.search-highlight'),
+					...commandList.querySelectorAll('[style*="#ffff00"]'),
+					...commandList.querySelectorAll('[style*="yellow"]')
+				]
+
+				allHighlights.forEach((el) => {
+					try {
+						if (el.tagName === 'MARK') {
+							// 处理mark元素
+							const parent = el.parentNode
+							if (parent) {
+								const textNode = document.createTextNode(
+									el.textContent || ''
+								)
+								parent.replaceChild(textNode, el)
+								parent.normalize()
+							}
+						} else if (el.hasAttribute('data-search-highlight')) {
+							// 处理带搜索标识的元素
+							const parent = el.parentNode
+							if (parent && el.textContent) {
+								const textNode = document.createTextNode(
+									el.textContent
+								)
+								parent.replaceChild(textNode, el)
+								parent.normalize()
+							}
+						} else {
+							// 处理其他高亮元素
+							el.classList.remove(
+								'search-match',
+								'search-highlight'
+							)
+							el.style.backgroundColor = ''
+							el.style.border = ''
+							el.style.boxShadow = ''
+						}
+					} catch (e) {}
+				})
+			}
+		} catch (e) {}
+	}
+
+	// 清除指定元素内的所有高亮
+	clearHighlightsInElement(element) {
+		if (!element || !element.querySelectorAll) return
+
+		try {
+			// 清除背景高亮
+			const matchedElements = element.querySelectorAll('.search-match')
+			matchedElements.forEach((el) => {
+				el.style.backgroundColor = ''
+				el.classList.remove('search-match')
+			})
+
+			// 清除单个元素高亮
+			const highlightedElements =
+				element.querySelectorAll('.search-highlight')
+			highlightedElements.forEach((el) => {
+				el.classList.remove('search-highlight')
+				el.style.backgroundColor = ''
+				el.style.border = ''
+				el.style.boxShadow = ''
+			})
+
+			// 清除文本高亮 - 最彻底的方法
+			const marks = element.querySelectorAll('mark')
+			const marksArray = Array.from(marks) // 转换为数组，避免动态NodeList问题
+
+			marksArray.forEach((mark) => {
+				try {
+					const parent = mark.parentNode
+
+					if (!parent) return
+
+					// 创建文本节点替换mark
+					const textNode = document.createTextNode(
+						mark.textContent || ''
+					)
+
+					// 如果mark的父节点是span，检查是否需要替换整个span
+					if (parent.tagName === 'SPAN') {
+						const grandParent = parent.parentNode
+
+						// 如果span只包含一个mark元素，替换整个span
+						if (parent.childNodes.length === 1 && grandParent) {
+							grandParent.replaceChild(textNode, parent)
+						} else {
+							// 否则只替换mark
+							parent.replaceChild(textNode, mark)
+						}
+					} else {
+						parent.replaceChild(textNode, mark)
+					}
+
+					// 合并相邻的文本节点
+					if (textNode.parentNode) {
+						textNode.parentNode.normalize()
+					}
+				} catch (e) {}
+			})
+
+			// 清理残留的高亮相关元素
+			const spansToCheck = element.querySelectorAll(
+				'span[style*="background"], span[style*="color"]'
+			)
+			spansToCheck.forEach((span) => {
+				// 检查是否是高亮相关的span
+				const style = span.getAttribute('style') || ''
+				if (
+					style.includes('background-color') &&
+					(style.includes('#ffff00') || style.includes('yellow'))
+				) {
+					try {
+						const parent = span.parentNode
+						if (parent && span.textContent) {
+							const textNode = document.createTextNode(
+								span.textContent
+							)
+							parent.replaceChild(textNode, span)
+							parent.normalize()
+						}
+					} catch (e) {}
+				}
+			})
+
+			// 清除可能残留的mark元素（以防第一次没清干净）
+			const remainingMarks = element.querySelectorAll('mark')
+			remainingMarks.forEach((mark) => {
+				try {
+					const parent = mark.parentNode
+					if (parent) {
+						const textNode = document.createTextNode(
+							mark.textContent || ''
+						)
+						parent.replaceChild(textNode, mark)
+						parent.normalize()
+					}
+				} catch (e) {}
+			})
+		} catch (e) {}
+	}
+
+	// 跳转到指定行
+	jumpToLine(targetLineNumber) {
+		// 保存要高亮的行号
+		this.highlightTargetLine = targetLineNumber - 1
+
+		// 查找目标行信息 (内部行号从0开始，显示行号从1开始)
+		const targetInfo = this.allCommands.get(targetLineNumber - 1)
+		if (!targetInfo) {
+			return false
+		}
+
+		// 如果命令是折叠的，需要先展开
+		if (targetInfo.folded) {
+			// 先找到所有需要展开的父命令
+			const parentCommands = this.findAllParentCommands(targetInfo)
+
+			// 收集所有需要展开的命令（包括父命令和目标命令本身）
+			const commandsToUnfold = []
+
+			// 添加父命令
+			for (const parent of parentCommands) {
+				if (parent.command && parent.command.folded) {
+					commandsToUnfold.push(parent)
+				}
+			}
+
+			// 检查目标本身是否也需要展开
+			if (targetInfo.command && targetInfo.command.folded) {
+				commandsToUnfold.push(targetInfo)
+			}
+
+			// 展开所有命令
+			if (commandsToUnfold.length > 0) {
+				// 使用原生的 unfoldCommand，它会递归处理
+				// 从最外层的命令开始
+				for (const cmdInfo of commandsToUnfold) {
+					if (cmdInfo.command) {
+						this.unfoldCommand(cmdInfo.command)
+					}
+				}
+
+				// 等待更新完成
+				setTimeout(() => {
+					// 再次查找目标（行号可能已改变）
+					let targetFound = false
+					for (const [lineIndex, info] of this.allCommands) {
+						// 通过文本内容匹配目标
+						if (info.text === targetInfo.text && !info.folded) {
+							// 高亮该元素
+							if (info.element) {
+								// 延迟确保内容加载
+								setTimeout(() => {
+									this.highlightElement(info.element)
+								}, 100)
+							} else {
+								// 元素可能不在视口，保持 highlightTargetLine 设置
+								this.highlightTargetLine = lineIndex
+							}
+
+							targetFound = true
+							break
+						}
+					}
+
+					if (!targetFound) {
+						// 尝试直接查找并高亮原行号
+						const elements = this.querySelectorAll('command-item')
+						for (const el of elements) {
+							const lineNum = this.expandedLineNumbers.get(el)
+							if (lineNum === targetLineNumber - 1) {
+								this.highlightElement(el)
+								return
+							}
+						}
+					}
+				}, 500)
+
+				return true
+			}
+		}
+
+		// 直接尝试高亮目标行（如果它没有被折叠）
+		if (!targetInfo.folded && targetInfo.element) {
+			// 延迟一下确保元素内容已加载
+			setTimeout(() => {
+				this.highlightElement(targetInfo.element)
+			}, 100)
+		} else if (!targetInfo.element) {
+			// 元素可能不在视口内，尝试查找
+			setTimeout(() => {
+				const elements = this.querySelectorAll('command-item')
+				for (const el of elements) {
+					const lineNum = this.expandedLineNumbers.get(el)
+					if (lineNum === targetLineNumber - 1) {
+						this.highlightElement(el)
+						return
+					}
+				}
+			}, 200)
+		}
+
+		return true
+	}
+
+	// 滚动到目标行
+	scrollToTargetLine(lineIndex, enableScroll = false) {
+		// 查找目标元素在 elements 数组中的位置
+		let targetElementIndex = -1
+		let targetElement = null
+
+		// 遍历所有元素找到目标
+		for (let i = 0; i < this.elements.count; i++) {
+			const element = this.elements[i]
+			const elementLine = this.expandedLineNumbers.get(element)
+			if (elementLine === lineIndex) {
+				targetElementIndex = i
+				targetElement = element
+				break
+			}
+		}
+
+		if (targetElementIndex === -1) {
+			return
+		}
+
+		// 计算滚动位置（每行高度20px）
+		const lineHeight = 20
+		const targetScrollTop = targetElementIndex * lineHeight
+		const containerHeight = this.clientHeight
+
+		// 滚动到目标位置（将目标置于视口中央）
+		const centerOffset = Math.floor(containerHeight / 2)
+		const scrollTop = Math.max(
+			0,
+			targetScrollTop - centerOffset + lineHeight / 2
+		)
+
+		// 只有在启用滚动时才真正滚动
+		if (enableScroll) {
+			this.scrollTop = scrollTop
+			this.resize()
+		}
+
+		// 等待DOM更新后查找并高亮元素
+		setTimeout(() => {
+			// 再次查找元素（可能已经被重新创建）
+			let visibleTarget = null
+			const visibleElements = this.querySelectorAll('command-item')
+
+			for (const element of visibleElements) {
+				const elementLine = this.expandedLineNumbers.get(element)
+				if (elementLine === lineIndex) {
+					visibleTarget = element
+					break
+				}
+			}
+
+			if (visibleTarget) {
+				// 高亮显示
+				this.highlightElement(visibleTarget)
+			} else {
+				// 保存要高亮的行号
+				this.pendingHighlightLine = lineIndex
+
+				// 强制更新视图以渲染目标元素
+				this.updateHeadAndFoot()
+
+				// 设置高亮目标行，等待元素创建时自动高亮
+				this.highlightTargetLine = lineIndex
+
+				// 强制更新视图以促使元素创建
+				this.updateHeadAndFoot()
+
+				// 延迟检查一次，确保元素已经创建
+				setTimeout(() => {
+					const allItems = this.querySelectorAll('command-item')
+					for (const item of allItems) {
+						const itemLine = this.expandedLineNumbers.get(item)
+						if (itemLine === lineIndex) {
+							this.highlightElement(item)
+							this.highlightTargetLine = undefined
+							return
+						}
+					}
+				}, 500)
+			}
+		}, 150)
+	}
+
+	// 查找包含目标的父命令
+	findParentCommand(targetInfo) {
+		// 方法1：通过行号范围查找
+		// 折叠的命令通常包含多行，我们需要找到包含目标行的折叠命令
+		const targetLine = targetInfo.lineNumber - 1 // 转换为0基准
+
+		// 查找所有折叠的命令
+		const foldedCommands = []
+		for (const [lineIndex, info] of this.allCommands) {
+			if (info.command && info.command.folded && !info.folded) {
+				// 这是一个折叠的命令的第一行
+				foldedCommands.push({ startLine: lineIndex, info: info })
+			}
+		}
+
+		// 找到包含目标行的折叠命令
+		for (const folded of foldedCommands) {
+			// 检查目标行是否在这个折叠命令的范围内
+			// 通常折叠命令会包含从它开始到下一个同级或更高级命令之间的所有行
+			if (
+				this.isLineInFoldedCommand(
+					targetLine,
+					folded.startLine,
+					folded.info
+				)
+			) {
+				return folded.info
+			}
+		}
+
+		// 方法2：通过元素的父子关系查找
+		if (targetInfo.element) {
+			// 查找元素的dataList和dataItem
+			const targetDataItem = targetInfo.element.dataItem
+			const targetDataList = targetInfo.element.dataList
+
+			if (targetDataItem && targetDataList) {
+				// 遍历所有命令，找到可能是父命令的
+				for (const [lineIndex, info] of this.allCommands) {
+					if (info.command && info.command.folded) {
+						// 检查这个命令是否包含目标
+						if (
+							this.commandContainsItem(
+								info.command,
+								targetDataItem,
+								targetDataList
+							)
+						) {
+							return info
+						}
+					}
+				}
+			}
+		}
+
+		return null
+	}
+
+	// 查找所有包含目标的父命令（可能有多层嵌套）
+	findAllParentCommands(targetInfo) {
+		const parentCommands = []
+		const targetLine = targetInfo.lineNumber - 1
+
+		// 收集所有折叠的命令
+		const foldedCommands = []
+		for (const [lineIndex, info] of this.allCommands) {
+			if (info.command && info.command.folded && !info.folded) {
+				foldedCommands.push({
+					startLine: lineIndex,
+					info: info,
+					indent: info.indent
+				})
+			}
+		}
+
+		// 按缩进级别排序（从外到内）
+		foldedCommands.sort((a, b) => a.indent - b.indent)
+
+		// 找到所有包含目标的折叠命令
+		for (const folded of foldedCommands) {
+			if (
+				this.isLineInFoldedCommand(
+					targetLine,
+					folded.startLine,
+					folded.info
+				)
+			) {
+				parentCommands.push(folded.info)
+			}
+		}
+
+		return parentCommands
+	}
+
+	// 检查行是否在折叠命令范围内
+	isLineInFoldedCommand(targetLine, foldedStartLine, foldedInfo) {
+		// 基本检查：目标行必须在折叠命令之后
+		if (targetLine <= foldedStartLine) {
+			return false
+		}
+
+		// 找到折叠命令的结束位置
+		// 通过缩进级别来判断
+		const foldedIndent = foldedInfo.indent
+
+		// 从折叠命令的下一行开始，找到第一个缩进级别小于等于折叠命令的行
+		for (
+			let line = foldedStartLine + 1;
+			line < this.allCommands.size;
+			line++
+		) {
+			const info = this.allCommands.get(line)
+			if (info && info.indent <= foldedIndent) {
+				// 找到了折叠命令的结束位置
+				return targetLine < line
+			}
+		}
+
+		// 如果没有找到结束位置，说明折叠命令延伸到最后
+		return true
+	}
+
+	// 检查命令是否包含指定项
+	commandContainsItem(command, targetItem, targetList) {
+		// 检查命令的参数中的子命令
+		if (command.params) {
+			// 检查 branches (if/switch)
+			if (command.params.branches) {
+				for (const branch of command.params.branches) {
+					if (
+						branch.commands === targetList ||
+						(branch.commands &&
+							branch.commands.includes(targetItem))
+					) {
+						return true
+					}
+				}
+			}
+
+			// 检查 elseCommands (if)
+			if (
+				command.params.elseCommands === targetList ||
+				(command.params.elseCommands &&
+					command.params.elseCommands.includes(targetItem))
+			) {
+				return true
+			}
+
+			// 检查 defaultCommands (switch)
+			if (
+				command.params.defaultCommands === targetList ||
+				(command.params.defaultCommands &&
+					command.params.defaultCommands.includes(targetItem))
+			) {
+				return true
+			}
+
+			// 检查 commands (loop等)
+			if (
+				command.params.commands === targetList ||
+				(command.params.commands &&
+					command.params.commands.includes(targetItem))
+			) {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	// 滚动到元素
+	scrollToElement(element) {
+		if (!element || !element.offsetParent) return
+
+		// 计算元素位置
+		const elementTop = element.offsetTop
+		const elementHeight = element.offsetHeight
+		const containerHeight = this.clientHeight
+		const scrollTop = this.scrollTop
+
+		// 计算最佳滚动位置（将元素置于视口中央）
+		const targetScrollTop =
+			elementTop - containerHeight / 2 + elementHeight / 2
+
+		// 平滑滚动
+		this.scrollTo({
+			top: Math.max(0, targetScrollTop),
+			behavior: 'smooth'
+		})
+	}
+
+	// 高亮显示元素
+	highlightElement(element) {
+		if (!element) return
+
+		// 如果有当前搜索词，高亮文本
+		if (this.currentSearchTerm) {
+			this.highlightTextInElement(element, this.currentSearchTerm)
+		}
+	}
+
+	// 获取命令的路径（用于显示命令的层级关系）
+	getCommandPath(command, parent) {
+		const path = []
+		if (parent && parent.id) {
+			path.push(parent.id)
+		}
+		if (command && command.id) {
+			path.push(command.id)
+		}
+		return path.join(' > ')
+	}
+
 	// 更新指令元素
 	updateCommandElement(element) {
+		const command = element.dataItem
+
+		// 收集渲染的文本内容
+		let renderedText = ''
+
 		// 设置文本缩进
 		element.style.textIndent = this.computeTextIndent(element.dataIndent)
 
@@ -10408,6 +13217,7 @@ class CommandList extends HTMLElement {
 		for (const content of element.contents) {
 			// 创建文本
 			if (content.text !== undefined) {
+				renderedText += content.text + ' '
 				const text = document.createElement('command-text')
 				text.textContent = content.text
 				text.addClass(content.color)
@@ -10508,7 +13318,17 @@ class CommandList extends HTMLElement {
 
 	// 删除指令缓冲区
 	deleteCommandBuffers(commands) {
+		// 检查 commands 参数是否有效
+		if (!commands || !Array.isArray(commands)) {
+			return
+		}
+
 		for (const command of commands) {
+			// 检查 command 是否存在
+			if (!command || typeof command !== 'object') {
+				continue
+			}
+
 			const { buffer } = command
 			if (!buffer) continue
 			for (const item of buffer) {
@@ -11051,7 +13871,7 @@ class CommandList extends HTMLElement {
 		}
 	}
 
-	// 折叠指令
+	// Fold/unfold command
 	fold(element) {
 		if (element === undefined && this.start !== null) {
 			const elements = this.elements
@@ -11241,8 +14061,6 @@ class CommandList extends HTMLElement {
 				let indent = element.dataIndent
 				// 如果当前缩进已经打印过至少一条指令，跳过无效指令
 				if (element.dataItem === null && lastIndent === indent) {
-					if (SettingConfig.config.other.copyAsTextKeepEmptyLine)
-						string += '\n'
 					continue
 				}
 				lastIndent = indent
@@ -11259,8 +14077,7 @@ class CommandList extends HTMLElement {
 						)
 					} else if (node.hasClass('comment')) {
 						// 添加注释指令前缀
-						// string = string.slice(0, -1) + '#' + node.textContent
-						string += '#' + node.textContent
+						string = string.slice(0, -1) + '#' + node.textContent
 					} else {
 						string += node.textContent
 					}
@@ -11322,6 +14139,7 @@ class CommandList extends HTMLElement {
 				})
 				list.splice(start, end - start)
 				this.update()
+				this.outputAllCommands()
 				this.select(this.start)
 				this.scrollToSelection('alter')
 				this.dispatchChangeEvent()
@@ -11363,6 +14181,7 @@ class CommandList extends HTMLElement {
 					this.end = this.start
 					list.splice(index, 0, command)
 					this.update()
+					this.outputAllCommands()
 					this.selectDown()
 					break
 				case false:
@@ -11377,6 +14196,7 @@ class CommandList extends HTMLElement {
 					})
 					list[index] = command
 					this.update()
+					this.outputAllCommands()
 					this.select(this.start)
 					break
 			}
@@ -11720,167 +14540,10 @@ class CommandList extends HTMLElement {
 		}
 	}
 
-	// 查找文本
-	findString(
-		str,
-		elements,
-		searchMode = { caseInsensitive: false, regex: false, matchLine: false }
-	) {
-		if (searchMode.regex) {
-			const strOri = str.trim()
-			try {
-				str = new RegExp(
-					strOri.substring(
-						strOri.indexOf('/') + 1,
-						strOri.lastIndexOf('/')
-					),
-					strOri.substring(strOri.lastIndexOf('/') + 1)
-				)
-			} catch {}
-		}
-		const findList = []
-		for (let i = 0; i < elements.length; i++) {
-			const element = elements[i]
-			if (!element) continue
-			if (searchMode.matchLine) {
-				switch (element.tagName) {
-					case 'COMMAND-FOLD':
-					case 'COMMAND-CONTAINER':
-						continue
-					default:
-						if (searchMode.regex && str instanceof RegExp) {
-							if (str.test(element.textContent))
-								findList.push({
-									node: element,
-									index: i,
-									sub: element
-								})
-						} else if (
-							searchMode.caseInsensitive &&
-							element.textContent
-								.toLowerCase()
-								.includes(str.toLowerCase())
-						)
-							findList.push({
-								node: element,
-								index: i,
-								sub: null
-							})
-						else if (element.textContent.includes(str))
-							findList.push({
-								node: element,
-								index: i,
-								sub: null
-							})
-				}
-				continue
-			}
-			if (element?.dataItem && element.dataItem.folded) {
-				// 查找折叠区域
-				const { buffer } = element.dataItem
-				if (!buffer) continue
-				for (const item of buffer) {
-					if (item instanceof Array) {
-						const realNode = item.map((v) => v.buffer[0])
-						const _subfind = this.findString(
-							str,
-							realNode,
-							searchMode
-						).map((v) => ({
-							...v,
-							sub: element
-						}))
-						findList.push(..._subfind)
-					} else if (searchMode.regex && str instanceof RegExp) {
-						if (str.test(item.textContent))
-							findList.push({
-								node: item,
-								index: i,
-								sub: element
-							})
-					} else if (
-						item.textContent.includes(str) ||
-						(searchMode.caseInsensitive &&
-							item.textContent
-								.toLowerCase()
-								.includes(str.toLowerCase()))
-					) {
-						findList.push({ node: item, index: i, sub: element })
-					}
-				}
-			}
-
-			if (element.contents !== null) {
-				this.updateCommandElement(element)
-			}
-
-			if (element?.children)
-				for (const node of element.children) {
-					if (node.tagName === 'COMMAND-FOLD') {
-						continue
-					}
-					if (searchMode.regex && str instanceof RegExp) {
-						if (str.test(node.textContent))
-							findList.push({
-								node,
-								index: i,
-								sub: element
-							})
-					} else if (
-						node.textContent.includes(str) ||
-						(searchMode.caseInsensitive &&
-							node.textContent
-								.toLowerCase()
-								.includes(str.toLowerCase()))
-					) {
-						findList.push({ node, index: i, sub: null })
-					}
-				}
-		}
-		return findList
-	}
-
-	// 滚动到指定行
-	scrollToRow(targetIndex, position = 'center') {
-		const count = this.elements.count
-		const rowHeight = 20
-
-		// 边界检查
-		if (targetIndex < 0) targetIndex = 0
-		if (targetIndex >= count) targetIndex = count - 1
-
-		const ch = this.innerHeight
-		const targetRowTop = targetIndex * rowHeight
-
-		// 计算目标滚动位置
-		let targetScrollTop
-		switch (position) {
-			case 'top':
-				targetScrollTop = targetRowTop
-				break
-			case 'bottom':
-				targetScrollTop = targetRowTop + rowHeight - ch
-				break
-			default: // center
-				targetScrollTop = targetRowTop - ch / 2 + rowHeight / 2
-		}
-
-		// 限制滚动范围
-		const maxScrollTop = count * rowHeight - ch
-		targetScrollTop = Math.max(0, Math.min(targetScrollTop, maxScrollTop))
-
-		// 设置滚动位置并触发重绘
-		this.scrollTop = targetScrollTop
-		this.resize(this) // 立即调用resize确保更新
-	}
-
 	// 键盘按下事件
 	keydown(event) {
 		if (event.cmdOrCtrlKey) {
 			switch (event.code) {
-				case 'KeyF':
-					SearchString.open(this)
-					break
 				case 'KeyX':
 					this.copy()
 					this.delete()
@@ -12368,6 +15031,982 @@ class CommandList extends HTMLElement {
 }
 
 customElements.define('command-list', CommandList)
+
+// 在控制台添加便捷的搜索函数
+window.searchCommands = function (keyword) {
+	const commandList = document.querySelector('command-list')
+	if (commandList && commandList.data) {
+		return commandList.searchAllCommands(keyword)
+	} else {
+		return []
+	}
+}
+
+// 显示所有命令（包括折叠的）
+window.showAllCommands = function () {
+	const commandList = document.querySelector('command-list')
+	if (
+		commandList &&
+		commandList.allCommands &&
+		commandList.allCommands.size > 0
+	) {
+		for (const [lineIndex, info] of commandList.allCommands) {
+			const prefix = !info.folded ? '✅' : '📦'
+			const indent = '  '.repeat(info.indent)
+		}
+		return commandList.allCommands
+	} else {
+		return new Map()
+	}
+}
+
+// 跳转到指定行
+window.jumpToLine = function (lineNumber) {
+	const commandList = document.querySelector('command-list')
+	if (commandList && commandList.jumpToLine) {
+		return commandList.jumpToLine(lineNumber)
+	} else {
+		return false
+	}
+}
+
+// 添加高亮样式
+if (!document.getElementById('command-highlight-style')) {
+	const style = document.createElement('style')
+	style.id = 'command-highlight-style'
+	style.textContent = `
+		mark {
+			background-color: #ffff33 !important;
+			color: #000 !important;
+			font-weight: bold !important;
+			padding: 0 1px;
+		}
+		mark.current-match {
+			background-color: #ff9900 !important;
+			color: #000 !important;
+			font-weight: bold !important;
+			padding: 0 2px;
+			border: 1px solid #ff6600;
+			border-radius: 2px;
+		}
+	`
+	document.head.appendChild(style)
+}
+
+// 全局搜索文本函数
+window.searchText = function (searchTerm) {
+	const commandList = document.querySelector('command-list')
+	if (commandList && typeof commandList.searchText === 'function') {
+		if (
+			!searchTerm ||
+			typeof searchTerm !== 'string' ||
+			searchTerm.trim() === ''
+		) {
+			commandList.clearAllHighlights()
+			commandList.currentSearchTerm = null
+			commandList.searchMatches = null
+			commandList.currentMatchIndex = -1
+
+			if (window.updateSearchCounter) {
+				window.updateSearchCounter(-1, 0, '')
+			}
+
+			setTimeout(() => {
+				if (commandList.validateAndCleanHighlights) {
+					commandList.validateAndCleanHighlights()
+				}
+			}, 200)
+			return false
+		}
+		return commandList.searchText(searchTerm)
+	} else {
+		return false
+	}
+}
+
+window.forceRemoveAllMarks = function () {
+	let attempts = 0
+	const maxAttempts = 5
+
+	function removeMarks() {
+		attempts++
+		const marks = document.querySelectorAll('mark')
+
+		if (marks.length === 0) {
+			return
+		}
+
+		const marksArray = Array.from(marks)
+		marksArray.forEach((mark) => {
+			try {
+				const text = mark.textContent || ''
+				const parent = mark.parentNode
+
+				if (parent) {
+					try {
+						const textNode = document.createTextNode(text)
+						parent.replaceChild(textNode, mark)
+					} catch (e) {
+						try {
+							mark.outerHTML = text
+						} catch (e2) {
+							mark.remove()
+						}
+					}
+				} else {
+					mark.remove()
+				}
+			} catch (e) {
+				try {
+					mark.remove()
+				} catch (e2) {
+					// 无法删除
+				}
+			}
+		})
+
+		const remainingMarks = document.querySelectorAll('mark')
+		if (remainingMarks.length > 0 && attempts < maxAttempts) {
+			setTimeout(removeMarks, 100)
+		}
+	}
+
+	removeMarks()
+}
+
+// 定期清除高亮的定时器
+let highlightCleanupInterval = null
+
+window.startHighlightCleanup = function () {
+	if (highlightCleanupInterval) {
+		clearInterval(highlightCleanupInterval)
+	}
+
+	highlightCleanupInterval = setInterval(() => {
+		try {
+			const searchBox = document.getElementById(
+				'event-content-search-box'
+			)
+			const commandList = document.querySelector('command-list')
+
+			// 只有在搜索框为空且没有当前搜索词时才清除
+			if (
+				(!searchBox || !searchBox.value) &&
+				(!commandList || !commandList.currentSearchTerm)
+			) {
+				const marks = document.querySelectorAll('mark')
+				if (marks.length > 0) {
+					if (window.forceRemoveAllMarks) {
+						window.forceRemoveAllMarks()
+					}
+				}
+			}
+		} catch (e) {
+			// 定时清除出错
+		}
+	}, 500)
+}
+
+window.stopHighlightCleanup = function () {
+	if (highlightCleanupInterval) {
+		clearInterval(highlightCleanupInterval)
+		highlightCleanupInterval = null
+	}
+}
+
+// 搜索计数器相关函数
+function createSearchCounter() {
+	const searchSection = document.querySelector('.search-section')
+	if (searchSection && !document.getElementById('search-counter')) {
+		const counter = document.createElement('div')
+		counter.id = 'search-counter'
+		counter.style.cssText = `
+			color: #666;
+			font-size: 12px;
+			margin-left: 8px;
+			white-space: nowrap;
+		`
+		searchSection.appendChild(counter)
+	}
+}
+
+// updateSearchCounter function is defined later as window.updateSearchCounter
+
+// 创建搜索框
+function createSearchBox() {
+	// 检查搜索框是否已存在
+	if (document.getElementById('event-content-search-box')) {
+		return
+	}
+
+	// 找到事件内容容器
+	const eventContent =
+		document.querySelector('.event-content') ||
+		document.querySelector('[data-editor-type="event"]') ||
+		document.querySelector('command-list')?.parentNode
+
+	if (!eventContent) {
+		return
+	}
+
+	// 创建搜索框容器
+	const searchContainer = document.createElement('div')
+	searchContainer.className = 'search-section'
+	searchContainer.id = 'search-container'
+	searchContainer.style.cssText = `
+		position: absolute;
+		top: 20px;
+		right: 50px;
+		z-index: 100;
+		display: none;
+		align-items: center;
+		gap: 8px;
+	`
+	// 添加隐藏标记，确保默认隐藏
+	searchContainer.setAttribute('data-hidden', 'true')
+
+	// 创建搜索输入框
+	const searchInput = document.createElement('input')
+	searchInput.id = 'event-content-search-box'
+	searchInput.type = 'text'
+	searchInput.placeholder = '搜索命令或跳转行号'
+	searchInput.style.cssText = `
+		width: 200px;
+		height: 24px;
+		padding: 4px 8px;
+		border: 1px solid #555;
+		background-color: #2a2a2a;
+		color: #ccc;
+		font-size: 12px;
+		border-radius: 4px;
+		outline: none;
+	`
+
+	// 添加聚焦样式
+	searchInput.addEventListener('focus', () => {
+		searchInput.style.borderColor = '#007acc'
+	})
+
+	searchInput.addEventListener('blur', () => {
+		searchInput.style.borderColor = '#555'
+	})
+
+	searchContainer.appendChild(searchInput)
+	eventContent.appendChild(searchContainer)
+}
+
+// HTML中已有搜索框，不需要自动创建
+
+// 切换搜索框显示/隐藏
+function toggleSearchBox() {
+	// 直接操作HTML中的搜索框
+	const searchBox = document.getElementById('event-content-search-box')
+
+	if (!searchBox) {
+		return
+	}
+
+	const isHidden =
+		searchBox.style.display === 'none' ||
+		window.getComputedStyle(searchBox).display === 'none'
+
+	// 获取搜索按钮和计数器
+	const searchPrev = document.getElementById('event-search-prev')
+	const searchNext = document.getElementById('event-search-next')
+	const searchClose = document.getElementById('event-search-close')
+	const searchCounter = document.getElementById('search-counter')
+
+	if (isHidden) {
+		// 显示搜索框和按钮
+		searchBox.style.display = 'block'
+		if (searchPrev) searchPrev.style.display = 'block'
+		if (searchNext) searchNext.style.display = 'block'
+		if (searchClose) {
+			searchClose.style.display = 'block'
+			searchClose.textContent = '×' // 确保显示×符号
+		}
+		// 搜索计数器在JavaScript中动态创建，不需要控制display
+		searchBox.focus()
+	} else {
+		// 隐藏搜索框和按钮
+		searchBox.style.display = 'none'
+		if (searchPrev) searchPrev.style.display = 'none'
+		if (searchNext) searchNext.style.display = 'none'
+		if (searchClose) searchClose.style.display = 'none'
+		// 隐藏搜索计数器
+		if (searchCounter) {
+			searchCounter.style.opacity = '0'
+		}
+
+		// 完全清除搜索状态
+		const commandList = document.querySelector('command-list')
+		if (commandList) {
+			// 清除所有搜索相关状态
+			commandList.clearAllHighlights()
+			commandList.currentSearchTerm = null
+			commandList.searchMatches = null
+			commandList.currentMatchIndex = -1
+			commandList.keyboardSelectedIndex = -1
+
+			// 清除计数器
+			if (window.updateSearchCounter) {
+				window.updateSearchCounter(-1, 0, '')
+			}
+
+			// 强制清理高亮
+			if (commandList.validateAndCleanHighlights) {
+				commandList.validateAndCleanHighlights()
+			}
+		}
+
+		// 清除全局搜索缓存
+		delete window._correctSearchData
+		delete window._eventCommandsArray
+
+		// 取消可能正在进行的防抖计时器
+		if (window._searchDebounceTimer) {
+			clearTimeout(window._searchDebounceTimer)
+			window._searchDebounceTimer = null
+		}
+
+		// 清除搜索内容并触发input事件确保清理逻辑执行
+		searchBox.value = ''
+		// 手动触发input事件，确保清除逻辑被执行
+		const inputEvent = new Event('input', { bubbles: true })
+		searchBox.dispatchEvent(inputEvent)
+		// 失焦
+		searchBox.blur()
+	}
+}
+
+// 强制清除所有mark标签的全局函数
+window.forceRemoveAllMarks = function () {
+	let attempts = 0
+	const maxAttempts = 5
+
+	function removeMarks() {
+		attempts++
+
+		const marks = document.querySelectorAll('mark')
+
+		if (marks.length === 0) {
+			return
+		}
+
+		// 转换为数组避免动态NodeList问题
+		const marksArray = Array.from(marks)
+		let clearedCount = 0
+
+		marksArray.forEach((mark, index) => {
+			try {
+				const text = mark.textContent || ''
+				const parent = mark.parentNode
+
+				// 尝试多种清除方法
+				if (parent) {
+					// 方法1: replaceChild
+					try {
+						const textNode = document.createTextNode(text)
+						parent.replaceChild(textNode, mark)
+						clearedCount++
+						return
+					} catch (e1) {
+						// 方法2: outerHTML
+						try {
+							mark.outerHTML = text
+							clearedCount++
+							return
+						} catch (e2) {
+							// 方法3: remove + insertText
+							try {
+								const nextSibling = mark.nextSibling
+								mark.remove()
+								const textNode = document.createTextNode(text)
+								if (nextSibling) {
+									parent.insertBefore(textNode, nextSibling)
+								} else {
+									parent.appendChild(textNode)
+								}
+								clearedCount++
+								return
+							} catch (e3) {
+								// 方法4: 直接删除
+								try {
+									mark.remove()
+									clearedCount++
+									return
+								} catch (e4) {}
+							}
+						}
+					}
+				} else {
+					// 孤立的mark，直接删除
+					try {
+						mark.remove()
+						clearedCount++
+					} catch (e) {}
+				}
+			} catch (e) {}
+		})
+
+		// 检查是否还有剩余，如果有且未达到最大尝试次数，再次尝试
+		const remainingMarks = document.querySelectorAll('mark')
+		if (remainingMarks.length > 0 && attempts < maxAttempts) {
+			setTimeout(removeMarks, 100) // 延迟一点再试
+		} else if (remainingMarks.length > 0) {
+		} else {
+		}
+	}
+
+	removeMarks()
+}
+
+// 启动高亮清除定时器
+window.startHighlightCleanup = function () {
+	if (highlightCleanupInterval) {
+		clearInterval(highlightCleanupInterval)
+	}
+
+	highlightCleanupInterval = setInterval(() => {
+		try {
+			const searchBox = document.getElementById(
+				'event-content-search-box'
+			)
+			const commandList = document.querySelector('command-list')
+
+			// 检查搜索框是否为空
+			const isSearchEmpty =
+				!searchBox || !searchBox.value || searchBox.value.trim() === ''
+
+			// 检查命令列表是否有活跃搜索
+			const hasActiveSearch =
+				commandList &&
+				commandList.currentSearchTerm &&
+				commandList.currentSearchTerm.trim() !== ''
+
+			if (isSearchEmpty && !hasActiveSearch) {
+				// 搜索框为空且没有活跃搜索，检查是否有残留高亮
+				const marks = document.querySelectorAll('mark')
+				if (marks.length > 0) {
+					if (window.forceRemoveAllMarks) {
+						window.forceRemoveAllMarks()
+					}
+				}
+			}
+		} catch (e) {}
+	}, 500)
+}
+
+// 停止高亮清除定时器
+window.stopHighlightCleanup = function () {
+	if (highlightCleanupInterval) {
+		clearInterval(highlightCleanupInterval)
+		highlightCleanupInterval = null
+	}
+}
+
+// 添加搜索框监听器
+setTimeout(() => {
+	const searchBox = document.getElementById('event-content-search-box')
+	if (searchBox) {
+		// 创建搜索计数器
+		createSearchCounter(searchBox)
+
+		// 启动定时清除
+		window.startHighlightCleanup()
+
+		// 添加滚动监听器，用于实时更新计数器
+		addScrollListener()
+
+		// 统一的输入处理 - 防抖处理和清除逻辑
+		searchBox.addEventListener('input', (e) => {
+			const originalValue = e.target.value
+			const trimmedValue = originalValue.trim()
+
+			// 清除之前的定时器
+			if (window._searchDebounceTimer) {
+				clearTimeout(window._searchDebounceTimer)
+				window._searchDebounceTimer = null
+			}
+
+			// 如果搜索框为空（包括只有空格的情况），立即清除高亮
+			if (
+				!originalValue ||
+				originalValue === '' ||
+				!trimmedValue ||
+				trimmedValue === ''
+			) {
+				const commandList = document.querySelector('command-list')
+				if (commandList) {
+					commandList.clearAllHighlights()
+					commandList.currentSearchTerm = null
+					commandList.searchMatches = null
+					commandList.currentMatchIndex = -1
+					commandList.keyboardSelectedIndex = -1
+
+					// 清除计数器 - 明确传递空字符串
+					if (window.updateSearchCounter) {
+						window.updateSearchCounter(-1, 0, '')
+					}
+
+					// 强制清理高亮
+					setTimeout(() => {
+						if (commandList.validateAndCleanHighlights) {
+							commandList.validateAndCleanHighlights()
+						}
+						// 强制移除所有mark标签
+						const marks = document.querySelectorAll(
+							'mark[data-search-highlight="true"]'
+						)
+						marks.forEach((mark) => {
+							const parent = mark.parentNode
+							if (parent) {
+								parent.replaceChild(
+									document.createTextNode(mark.textContent),
+									mark
+								)
+								parent.normalize()
+							}
+						})
+
+						// 额外确保计数器被清除
+						const counter = document.getElementById(
+							'search-counter-display'
+						)
+						if (counter) {
+							counter.style.opacity = '0'
+							counter.textContent = ''
+						}
+					}, 50)
+				}
+				return
+			}
+
+			// 150ms 防抖
+			window._searchDebounceTimer = setTimeout(() => {
+				if (/^\d+$/.test(trimmedValue)) {
+					// 纯数字 - 行号跳转
+					jumpToLine(parseInt(trimmedValue))
+				} else {
+					// 文本搜索
+					searchText(trimmedValue)
+				}
+				window._searchDebounceTimer = null
+			}, 150)
+		})
+
+		// 添加额外的检查，确保搜索框完全清空时清除状态
+		searchBox.addEventListener('keyup', (e) => {
+			const value = e.target.value
+			if (!value || value === '') {
+				const commandList = document.querySelector('command-list')
+				if (commandList) {
+					commandList.clearAllHighlights()
+					commandList.currentSearchTerm = null
+					commandList.searchMatches = null
+					commandList.currentMatchIndex = -1
+					commandList.keyboardSelectedIndex = -1
+
+					if (window.updateSearchCounter) {
+						window.updateSearchCounter(-1, 0, '')
+					}
+				}
+			}
+		})
+
+		// 添加搜索按钮事件监听器
+		const searchPrev = document.getElementById('event-search-prev')
+		const searchNext = document.getElementById('event-search-next')
+		const searchClose = document.getElementById('event-search-close')
+
+		if (searchPrev) {
+			searchPrev.addEventListener('click', () => {
+				const commandList = document.querySelector('command-list')
+				if (
+					commandList &&
+					typeof commandList.navigateToPrevMatch === 'function' &&
+					commandList.currentSearchTerm
+				) {
+					commandList.navigateToPrevMatch(
+						commandList.currentSearchTerm
+					)
+				}
+			})
+		}
+
+		if (searchNext) {
+			searchNext.addEventListener('click', () => {
+				const commandList = document.querySelector('command-list')
+				if (
+					commandList &&
+					typeof commandList.navigateToNextMatch === 'function' &&
+					commandList.currentSearchTerm
+				) {
+					commandList.navigateToNextMatch(
+						commandList.currentSearchTerm
+					)
+				}
+			})
+		}
+
+		if (searchClose) {
+			// 确保关闭按钮显示×符号
+			searchClose.textContent = '×'
+			searchClose.addEventListener('click', () => {
+				toggleSearchBox()
+			})
+		}
+	} else {
+	}
+}, 1000)
+
+// 创建搜索计数器
+function createSearchCounter(searchBox) {
+	// 检查是否已经存在计数器
+	let counter = document.getElementById('search-counter')
+	if (counter) {
+		return counter
+	}
+
+	// 创建计数器元素
+	counter = document.createElement('div')
+	counter.id = 'search-counter'
+	counter.style.cssText = `
+		position: absolute;
+		right: 336px;
+		top: 20px;
+		width: 80px;
+		height: 26px;
+		padding: 4px 8px;
+		background-color: #2a2a2a;
+		border: 1px solid #555;
+		color: #ccc;
+		font-size: 11px;
+		font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+		text-align: center;
+		line-height: 18px;
+		border-radius: 0;
+		box-sizing: border-box;
+		z-index: 101;
+		user-select: none;
+		pointer-events: none;
+		opacity: 0;
+		transition: opacity 0.2s ease;
+	`
+	counter.textContent = ''
+
+	// 插入到页面中（在搜索框的父容器中）
+	const parent = searchBox.parentNode
+	if (parent) {
+		parent.appendChild(counter)
+
+		// 确保搜索框容器默认隐藏
+		if (parent.id === 'search-container') {
+			parent.style.display = 'none'
+			parent.setAttribute('data-hidden', 'true')
+		}
+	}
+
+	// 添加键盘快捷键支持
+	addNavigationKeyboardShortcuts()
+
+	return counter
+}
+
+// 删除导航按钮，只使用小键盘上下键导航
+
+// 添加导航键盘快捷键
+function addNavigationKeyboardShortcuts() {
+	// 避免重复添加
+	if (window._navigationKeyboardAdded) {
+		return
+	}
+	window._navigationKeyboardAdded = true
+
+	// 全局Ctrl+F快捷键处理（不限制搜索状态）
+	document.addEventListener('keydown', (e) => {
+		// Ctrl+F 切换搜索框
+		if (e.ctrlKey && e.key === 'f') {
+			e.preventDefault()
+			toggleSearchBox()
+			return
+		}
+
+		// ESC键隐藏搜索框（只在搜索框获得焦点时）
+		if (e.key === 'Escape') {
+			const searchBox = document.getElementById(
+				'event-content-search-box'
+			)
+			if (
+				searchBox &&
+				document.activeElement === searchBox &&
+				window.getComputedStyle(searchBox).display !== 'none'
+			) {
+				e.preventDefault()
+				// 使用统一的关闭逻辑
+				toggleSearchBox()
+				return
+			}
+		}
+	})
+
+	document.addEventListener('keydown', (e) => {
+		// 检查是否在搜索状态
+		const commandList = document.querySelector('command-list')
+		if (!commandList || !commandList.currentSearchTerm) {
+			return
+		}
+
+		// Ctrl + 上箭头 = 上一项
+		if (e.ctrlKey && e.key === 'ArrowUp') {
+			e.preventDefault()
+
+			if (
+				typeof commandList.navigateToPrevMatch === 'function' &&
+				commandList.currentSearchTerm
+			) {
+				commandList.navigateToPrevMatch(commandList.currentSearchTerm)
+			}
+		}
+		// Ctrl + 下箭头 = 下一项
+		else if (e.ctrlKey && e.key === 'ArrowDown') {
+			e.preventDefault()
+
+			if (
+				typeof commandList.navigateToNextMatch === 'function' &&
+				commandList.currentSearchTerm
+			) {
+				commandList.navigateToNextMatch(commandList.currentSearchTerm)
+			}
+		}
+		// F3 = 下一项 (常见的查找下一项快捷键)
+		else if (e.key === 'F3' && !e.shiftKey) {
+			e.preventDefault()
+
+			if (
+				typeof commandList.navigateToNextMatch === 'function' &&
+				commandList.currentSearchTerm
+			) {
+				commandList.navigateToNextMatch(commandList.currentSearchTerm)
+			}
+		}
+		// Shift + F3 = 上一项
+		else if (e.key === 'F3' && e.shiftKey) {
+			e.preventDefault()
+
+			if (
+				typeof commandList.navigateToPrevMatch === 'function' &&
+				commandList.currentSearchTerm
+			) {
+				commandList.navigateToPrevMatch(commandList.currentSearchTerm)
+			}
+		}
+	})
+}
+
+// 更新搜索计数器（基于快捷键导航的选择）
+window.updateSearchCounter = function (
+	keyboardIndex,
+	totalCount,
+	searchTerm = '',
+	hasAutoExpanded = false,
+	expandedCount = 0
+) {
+	const counter = document.getElementById('search-counter')
+
+	if (!counter) return
+
+	if (!searchTerm || searchTerm.trim() === '') {
+		// 没有搜索词，隐藏计数器
+		counter.style.opacity = '0'
+		counter.textContent = ''
+		return
+	}
+
+	if (totalCount === 0) {
+		// 有搜索词但没有结果，显示"没有匹配的数据"
+		counter.style.opacity = '1'
+		counter.textContent = '没有匹配的数据'
+		counter.style.color = '#ff6666' // 红色表示没有结果
+		return
+	}
+
+	// 显示计数器
+	counter.style.opacity = '1'
+
+	// 构建基础文本
+	let baseText = ''
+	if (keyboardIndex >= 0 && keyboardIndex < totalCount) {
+		// 显示当前项和总数（快捷键选择的项）
+		baseText = `第${keyboardIndex + 1}项 共${totalCount}项`
+		counter.style.color = '#66ff66' // 绿色表示有选中项
+	} else {
+		// 只显示总数，没有快捷键选中项
+		baseText = `共${totalCount}项`
+		counter.style.color = '#ccc' // 灰色表示没有选中项
+	}
+
+	counter.textContent = baseText
+}
+
+// 按钮状态更新函数已删除，只使用小键盘导航
+
+// 根据当前视窗位置智能确定当前搜索项
+window.determineCurrentSearchItem = function (searchMatches) {
+	if (!searchMatches || searchMatches.length === 0) {
+		return -1
+	}
+
+	const commandList = document.querySelector('command-list')
+	if (!commandList) {
+		return -1
+	}
+
+	// 获取当前视窗的中心位置
+	const listRect = commandList.getBoundingClientRect()
+	const viewportCenter = listRect.top + listRect.height / 2
+
+	let closestIndex = -1
+	let closestDistance = Infinity
+	let visibleMatches = 0
+
+	// 找到距离视窗中心最近的匹配项
+	searchMatches.forEach((match, index) => {
+		// 尝试多种方式获取元素
+		let element = null
+
+		// 方法1: 直接使用match.element
+		if (match.element && match.element.getBoundingClientRect) {
+			element = match.element
+		}
+		// 方法2: 通过lineNumber查找元素
+		if (!element && match.lineNumber) {
+			// 方法2a: 通过allCommands映射查找
+			if (
+				commandList.allCommands &&
+				commandList.allCommands.has(match.lineNumber)
+			) {
+				const commandInfo = commandList.allCommands.get(
+					match.lineNumber
+				)
+				if (commandInfo && commandInfo.element) {
+					element = commandInfo.element
+				}
+			}
+
+			// 方法2b: 通过dataIndex查找
+			if (!element) {
+				const commandItems =
+					commandList.querySelectorAll('command-item')
+				for (const item of commandItems) {
+					if (item.dataIndex === match.lineNumber) {
+						// 现在都使用0-based系统
+						element = item
+
+						break
+					}
+				}
+			}
+
+			// 方法2c: 通过可见元素的文本匹配
+			if (!element) {
+				const commandItems =
+					commandList.querySelectorAll('command-item')
+				for (const item of commandItems) {
+					if (
+						item.textContent &&
+						match.text &&
+						item.textContent.includes(match.text.substring(0, 15))
+					) {
+						element = item
+
+						break
+					}
+				}
+			}
+		}
+
+		if (element && element.getBoundingClientRect) {
+			try {
+				const elementRect = element.getBoundingClientRect()
+				const elementCenter = elementRect.top + elementRect.height / 2
+				const distance = Math.abs(elementCenter - viewportCenter)
+
+				// 检查是否在视窗内
+				if (
+					elementRect.bottom > listRect.top &&
+					elementRect.top < listRect.bottom
+				) {
+					visibleMatches++
+
+					if (distance < closestDistance) {
+						closestDistance = distance
+						closestIndex = index
+					}
+				} else {
+				}
+			} catch (e) {}
+		} else {
+		}
+	})
+
+	// 只有当最近的元素在视窗内且距离合理时才返回其索引
+	if (closestIndex >= 0 && closestDistance < listRect.height / 2) {
+		return closestIndex
+	}
+
+	return -1
+}
+
+window.updateCurrentSearchItem = function () {
+	// 手动滚动不影响计数器显示
+	return
+}
+
+// 添加滚动监听器
+function addScrollListener() {
+	const commandList = document.querySelector('command-list')
+	if (!commandList) {
+		return
+	}
+
+	let scrollTimeout = null
+
+	const handleScroll = () => {
+		// 防抖处理，避免频繁触发
+		if (scrollTimeout) {
+			clearTimeout(scrollTimeout)
+		}
+
+		scrollTimeout = setTimeout(() => {
+			// 更新搜索计数器
+			if (window.updateCurrentSearchItem) {
+				window.updateCurrentSearchItem()
+			}
+
+			// 高亮新出现的匹配元素
+			if (
+				commandList.currentSearchTerm &&
+				commandList.highlightVisibleMatches
+			) {
+				commandList.highlightVisibleMatches()
+			}
+		}, 100) // 滚动停止100ms后更新
+	}
+
+	// 监听滚动事件
+	commandList.addEventListener('scroll', handleScroll, { passive: true })
+
+	// 监听自定义的userscroll事件（如果存在）
+	commandList.addEventListener('userscroll', handleScroll, { passive: true })
+}
+
+// 页面卸载时清理定时器，防止内存泄漏
+window.addEventListener('beforeunload', () => {
+	if (window.stopHighlightCleanup) {
+		window.stopHighlightCleanup()
+	}
+})
 
 // ******************************** 脚本参数面板 ********************************
 

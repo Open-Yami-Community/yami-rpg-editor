@@ -14408,8 +14408,57 @@ CommandSuggestion.list.updateCommandNames = (function IIFE() {
 	}
 	return function () {
 		update(this.data, Local.createGetter('command'))
+		// 调用特殊处理函数
+		this.processSpecialElements(this.data)
 	}
 })()
+
+// 列表扩展方法 - 处理特殊元素
+CommandSuggestion.list.processSpecialElements = function (allcommand) {
+	// 当所有命令加载完成后调用此函数处理特殊元素
+	// 目前只是调用 allcommand 数据进行基础处理
+	if (!allcommand || !Array.isArray(allcommand)) {
+		return
+	}
+
+	// 基础处理：遍历所有命令数据
+	// 这里可以根据需要添加特殊元素的处理逻辑
+	this.traverseCommands(allcommand)
+}
+
+// 遍历命令数据的辅助函数
+CommandSuggestion.list.traverseCommands = function (commands) {
+	for (const command of commands) {
+		// 处理当前命令
+		this.processCommand(command)
+
+		// 如果有子命令，递归处理
+		if (command.children && Array.isArray(command.children)) {
+			this.traverseCommands(command.children)
+		}
+	}
+}
+
+// 处理单个命令的函数
+CommandSuggestion.list.processCommand = function (command) {
+	// 当前仅做基础处理
+	// 可以在这里添加对特殊命令类型的识别和处理逻辑
+
+	// 例如：标记特殊命令类型
+	if (command.value && typeof command.value === 'string') {
+		// 为将来的特殊处理预留接口
+		if (this.isSpecialCommand(command)) {
+			command.isSpecial = true
+		}
+	}
+}
+
+// 判断是否为特殊命令的函数
+CommandSuggestion.list.isSpecialCommand = function (command) {
+	// 目前返回 false，可以根据需要扩展逻辑
+	// 例如：判断特定的命令类型或包含特殊关键字的命令
+	return false
+}
 
 // 列表扩展方法 - 创建指令提示
 CommandSuggestion.list.createCommandTip = (function IIFE() {
@@ -14778,6 +14827,7 @@ const EventEditor = {
 	fetchCommandBuffer: null,
 	clearCommandBuffers: null,
 	getGlobalEventName: null,
+	initGlobalSearcher: null,
 	// events
 	windowLocalize: null,
 	windowClose: null,
@@ -14820,6 +14870,17 @@ EventEditor.list.closeButtonClick = null
 
 // 初始化
 EventEditor.initialize = function () {
+	// 初始化左侧搜索框
+	const searchBox = document.getElementById('event-search-box')
+	if (searchBox) {
+		searchBox.addEventListener('input', (e) => {
+			const searchText = e.target.value
+			if (EventEditor.list && EventEditor.list.searchNodes) {
+				EventEditor.list.searchNodes(searchText)
+			}
+		})
+	}
+
 	// 绑定打开事件列表
 	const { list } = this
 	list.removable = true
@@ -15110,6 +15171,260 @@ EventEditor.initialize = function () {
 	this.commandList.on('scroll', this.commandListScroll)
 	$('#event-confirm').on('click', this.confirm)
 	$('#event-apply').on('click', this.apply)
+}
+
+// 调试命令列表 - 输出每行的内容信息
+EventEditor.debugCommandList = function (item) {
+	const commandList = this.commandList
+	if (!commandList || !commandList.data) {
+		return
+	}
+
+	// 输出调试行的辅助函数
+	this.outputDebugLine = function (element, linesArray) {
+		const displayText = element.displayText?.trim() || ''
+
+		linesArray.push({
+			lineNumber: element.lineNumber,
+			indent: element.indent,
+			displayText: displayText,
+			rawText: displayText,
+			folded: element.folded,
+			command: element.command,
+			isEmpty: displayText === '' || element.isEmpty
+		})
+
+		const indentStr = '  '.repeat(element.indent)
+		let statusInfo = ''
+		if (element.folded) statusInfo += ' [原本折叠]'
+		// 只有真正的空行才显示[空行]标记
+		if ((displayText === '' || element.isEmpty) && !displayText) {
+			statusInfo += ' [空行]'
+		}
+	}
+
+	// 等待CommandList完成渲染，然后直接读取其内部的元素映射
+	setTimeout(() => {
+		try {
+			const linesArray = []
+			let lineNumber = 1
+
+			// 强制递归所有命令，无视折叠状态，完全模拟CommandList的createCommandBuffer
+			const forceProcessAll = (commands, indent = 0) => {
+				for (let i = 0; i < commands.length; i++) {
+					const command = commands[i]
+
+					try {
+						// 检查命令的真实折叠状态
+						let isFolded = false
+						if (command.folded !== undefined) {
+							isFolded = command.folded
+						} else if (
+							command.buffer &&
+							command.buffer.length > 0
+						) {
+							// 检查命令缓冲区中是否有折叠信息
+							const firstElement = command.buffer[0]
+							if (firstElement && firstElement.fold) {
+								isFolded = true
+							}
+						}
+
+						// 完全模拟CommandList的createCommandBuffer逻辑
+						const parsed = Command.parse(
+							command,
+							commandList.varMap
+						)
+						if (parsed && Array.isArray(parsed)) {
+							// 模拟创建第一个command-item（li）
+							let currentElement = {
+								lineNumber: lineNumber,
+								indent: indent,
+								displayText: '',
+								contents: [],
+								folded: isFolded,
+								command: command
+							}
+
+							// 处理parsed内容，完全按CommandList的逻辑
+							for (let j = 0; j < parsed.length; j++) {
+								const content = parsed[j]
+
+								// 保存文本内容到当前元素
+								if (content.text !== undefined) {
+									currentElement.contents.push(content)
+									currentElement.displayText += content.text
+								}
+
+								// 换行 - 创建新的command-item（空元素）
+								if (content.break !== undefined) {
+									// 先输出当前元素（比如"结束"）
+									this.outputDebugLine(
+										currentElement,
+										linesArray
+									)
+									lineNumber++
+
+									// 然后创建并立即输出新的空行元素
+									const emptyElement = {
+										lineNumber: lineNumber,
+										indent: indent,
+										displayText: '',
+										contents: [],
+										folded: isFolded,
+										command: command,
+										isEmpty: true // 这是content.break创建的空行
+									}
+									this.outputDebugLine(
+										emptyElement,
+										linesArray
+									)
+									lineNumber++
+
+									// 为后续内容准备新的元素
+									currentElement = {
+										lineNumber: lineNumber,
+										indent: indent,
+										displayText: '',
+										contents: [],
+										folded: isFolded,
+										command: command
+									}
+									continue
+								}
+
+								// 创建子项目 - 对应switch分支等
+								if (content.children !== undefined) {
+									// 先输出当前元素
+									this.outputDebugLine(
+										currentElement,
+										linesArray
+									)
+									lineNumber++
+
+									// 递归处理子命令（增加缩进）
+									if (Array.isArray(content.children)) {
+										forceProcessAll(
+											content.children,
+											indent + 1
+										)
+									}
+
+									// 如果不是最后一个内容，创建新的空元素
+									if (j < parsed.length - 1) {
+										currentElement = {
+											lineNumber: lineNumber,
+											indent: indent,
+											displayText: '',
+											contents: [],
+											folded: isFolded,
+											command: command,
+											isEmpty: true
+										}
+										continue
+									}
+								}
+							}
+
+							// 输出最后的元素（如果还没输出的话）
+							if (currentElement) {
+								this.outputDebugLine(currentElement, linesArray)
+								lineNumber++
+							}
+						} else {
+							// 解析失败的备用处理 - 仍然占一行
+							const element = {
+								lineNumber: lineNumber,
+								indent: indent,
+								displayText: '',
+								contents: [],
+								folded: isFolded,
+								command: command
+							}
+
+							if (
+								command.id === 'comment' &&
+								command.params?.comment
+							) {
+								element.displayText = `注释: ${command.params.comment}`
+							} else {
+								element.displayText =
+									Local.get('command.' + command.id) ||
+									command.id ||
+									'未知命令'
+							}
+
+							this.outputDebugLine(element, linesArray)
+							lineNumber++
+						}
+					} catch (e) {
+						const element = {
+							lineNumber: lineNumber,
+							indent: indent,
+							displayText: `[解析错误] ${e.message}`,
+							contents: [],
+							folded: false,
+							command: command
+						}
+						this.outputDebugLine(element, linesArray)
+						lineNumber++
+					}
+				}
+			}
+
+			// 开始强制处理所有命令
+			if (commandList.data && Array.isArray(commandList.data)) {
+				forceProcessAll(commandList.data)
+			}
+
+			// 存储结果
+			commandList.debugLines = linesArray
+		} catch (e) {
+			this.debugCommandListFallback(commandList)
+		}
+	}, 200)
+}
+
+// 备用调试方法
+EventEditor.debugCommandListFallback = function (commandList) {
+	// 直接遍历elements数组
+	if (commandList.elements && commandList.elements.count > 0) {
+		console.log(`\n=== 遍历CommandList.elements ===`)
+
+		for (let i = 0; i < commandList.elements.count; i++) {
+			const element = commandList.elements[i]
+			let displayText = '未知内容'
+
+			try {
+				if (element) {
+					// 尝试多种方式获取显示文本
+					if (element.textContent) {
+						displayText = element.textContent.trim()
+					} else if (element.innerText) {
+						displayText = element.innerText.trim()
+					} else if (element.contents) {
+						const textParts = []
+						for (const content of element.contents) {
+							if (content.text) {
+								textParts.push(content.text)
+							}
+						}
+						displayText = textParts
+							.join(' ')
+							.replace(/\s+/g, ' ')
+							.trim()
+					}
+
+					const indent = element.dataIndent || 0
+					const indentStr = '  '.repeat(indent)
+
+					console.log(`元素${i + 1}: ${indentStr}${displayText}`)
+				}
+			} catch (e) {
+				console.log(`元素${i + 1}: [解析错误] ${e.message}`)
+			}
+		}
+	}
 }
 
 // 打开本地事件
@@ -15483,6 +15798,64 @@ EventEditor.openCommandList = function (item) {
 	const write = getElementWriter('event')
 	write('commands', commands)
 	write('type', item.type)
+
+	// 保存当前项引用，供搜索功能使用
+	EventEditor.currentItem = item
+
+	// 延迟输出命令列表信息到控制台
+	setTimeout(() => {
+		EventEditor.debugCommandList(item)
+	}, 150)
+
+	// 调试：打印所有指令数据
+
+	// 递归打印所有指令
+	const printCommands = (cmdList, indent = 0) => {
+		const prefix = '  '.repeat(indent)
+
+		for (let i = 0; i < cmdList.length; i++) {
+			const cmd = cmdList[i]
+			let cmdText = prefix + `[${i}] `
+
+			// 获取命令ID和本地化文本
+			if (cmd.id) {
+				const localKey = 'command.' + cmd.id
+				const localText = Local.get(localKey)
+				cmdText += `ID: ${cmd.id}`
+				if (localText !== localKey) {
+					cmdText += ` (${localText})`
+				}
+			} else {
+				cmdText += '(无ID)'
+			}
+
+			// 添加命令参数信息
+			const params = []
+			for (const key in cmd) {
+				if (
+					key !== 'id' &&
+					key !== 'commands' &&
+					key !== 'buffer' &&
+					key !== 'folded'
+				) {
+					const value = cmd[key]
+					if (value !== undefined && value !== null) {
+						params.push(`${key}=${JSON.stringify(value)}`)
+					}
+				}
+			}
+			if (params.length > 0) {
+				cmdText += ' - ' + params.join(', ')
+			}
+
+			// 递归打印子命令
+			if (cmd.commands && Array.isArray(cmd.commands)) {
+				printCommands(cmd.commands, indent + 2)
+			}
+		}
+	}
+
+	printCommands(commands)
 }
 
 // 关闭指令列表
@@ -15552,21 +15925,42 @@ EventEditor.resizeGutter = function () {
 	}
 }
 
-// 更新行号列表
+// Update line number list
 EventEditor.updateGutter = function (force) {
 	const { commandList } = this
 	const { scrollTop } = commandList
 	const { outerGutter, innerGutter } = EventEditor
-	const start = Math.floor(scrollTop / 20) + 1
-	const end = commandList.elements.count + 1
-	if (innerGutter.start !== start || force) {
-		innerGutter.start = start
-		const nodes = innerGutter.childNodes
-		const length = nodes.length
-		for (let i = 0; i < length; i++) {
+	const { elements } = commandList
+
+	// Calculate the first visible element index
+	const startIndex = Math.floor(scrollTop / 20)
+	const nodes = innerGutter.childNodes
+	const nodeLength = nodes.length
+	const elementsCount = elements.count
+
+	// Check if update is needed
+	if (innerGutter.startIndex !== startIndex || force) {
+		innerGutter.startIndex = startIndex
+
+		// Update each line number node
+		for (let i = 0; i < nodeLength; i++) {
 			const node = nodes[i]
-			const number = start + i
-			if (number < end) {
+			const elementIndex = startIndex + i
+
+			if (elementIndex < elementsCount) {
+				// Get the actual line number for this element
+				const element = elements[elementIndex]
+				let number = elementIndex + 1
+
+				// Use expanded line number mapping
+				if (element && commandList.expandedLineNumbers) {
+					const expandedLine =
+						commandList.expandedLineNumbers.get(element)
+					if (expandedLine !== undefined) {
+						number = expandedLine + 1
+					}
+				}
+
 				if (node.number !== number) {
 					node.number = number
 					node.textContent = number.toString()
@@ -15581,7 +15975,7 @@ EventEditor.updateGutter = function (force) {
 			}
 		}
 	}
-	// 通过容差来消除非1:1时的抖动
+	// Use tolerance to eliminate jitter when not 1:1
 	const tolerance = 0.0001
 	outerGutter.scrollTop = (scrollTop + tolerance) % 20
 }
@@ -15649,6 +16043,8 @@ EventEditor.clearCommandBuffers = function () {
 EventEditor.getGlobalEventName = function (id) {
 	return Data.manifest.guidMap[id]?.file.basename ?? ''
 }
+
+// 初始化全局搜索框（延迟调用）
 
 // 窗口 - 本地化事件
 EventEditor.windowLocalize = function (event) {
@@ -15912,6 +16308,488 @@ EventEditor.commandListChange = function (event) {
 		EventEditor.list.updateItemName(item)
 	}
 }
+
+// 删除所有旧的搜索相关函数
+/*
+EventEditor.handleSearch = function (query) {
+	
+	// 清除之前的高亮
+	this.clearHighlights()
+	
+	// 重置搜索状态
+	EventEditor.search.query = query
+	EventEditor.search.matches = []
+	EventEditor.search.currentIndex = -1
+	
+	// 更新计数器显示
+	const counter = document.getElementById('event-search-counter')
+	if (counter) {
+		counter.textContent = ''
+	}
+	
+	if (!query) {
+		EventEditor.search.pendingQuery = null
+		return
+	}
+	
+	// 检查commandList
+	if (!this.commandList || !this.commandList.elements) {
+		return
+	}
+	
+	// 检查是否在首次搜索延迟期间
+	if (EventEditor.search.firstSearchDelay) {
+		EventEditor.search.pendingQuery = query
+		setTimeout(() => {
+			if (EventEditor.search.pendingQuery === query) {
+				EventEditor.handleSearch(query)
+			}
+		}, 350)
+		return
+	}
+	
+	// 检查是否有元素已经渲染
+	if (this.commandList.elements.count === 0 || (EventEditor.search.waitingForRender && this.commandList.elements.count < 5)) {
+		EventEditor.search.pendingQuery = query
+		return
+	}
+	
+	const queryLower = query.toLowerCase()
+	const elements = this.commandList.elements
+	const matchedElements = []
+	
+	
+	// 首先检查是否有很多未渲染的元素（虚拟滚动）
+	let unrenderedCount = 0
+	for (let i = 0; i < elements.count; i++) {
+		if (!elements[i]) {
+			unrenderedCount++
+		}
+	}
+	
+	
+	// 如果有大量未渲染元素，先在数据中搜索
+	if (unrenderedCount > 10) {
+		
+		// 在原始数据中搜索
+		const dataMatches = []
+		let globalIndex = 0
+		
+		const searchInData = (commands, depth = 0) => {
+			for (let i = 0; i < commands.length; i++) {
+				const command = commands[i]
+				
+				// 尝试获取命令的显示文本
+				let commandText = ''
+				try {
+					const parsed = Command.parse(command, this.commandList.varMap)
+					for (const content of parsed) {
+						if (content.text) {
+							commandText += content.text + ' '
+						}
+					}
+				} catch (e) {
+					// 解析失败，使用ID
+					if (command.id) {
+						commandText = Local.get('command.' + command.id)
+					}
+				}
+				
+				// 检查是否匹配
+				if (commandText.toLowerCase().includes(queryLower)) {
+					dataMatches.push({
+						index: globalIndex,
+						command: command,
+						text: commandText.trim()
+					})
+				}
+				
+				globalIndex++
+				
+				// 递归搜索子命令（支持两种格式）
+				let subCommands = null
+				if (command.commands && Array.isArray(command.commands)) {
+					subCommands = command.commands
+				} else if (command.params && command.params.commands && Array.isArray(command.params.commands)) {
+					subCommands = command.params.commands
+				}
+				
+				if (subCommands) {
+					searchInData(subCommands, depth + 1)
+				}
+			}
+			
+			// 空行也占一个索引
+			globalIndex++
+		}
+		
+		// 搜索数据
+		if (this.commandList.data) {
+			searchInData(this.commandList.data)
+		}
+		
+		// 如果找到匹配，滚动到第一个
+		if (dataMatches.length > 0) {
+			const firstMatch = dataMatches[0]
+			
+			// 计算滚动位置
+			const elementHeight = 20
+			const containerHeight = this.commandList.clientHeight
+			const targetScrollTop = (firstMatch.index * elementHeight) - (containerHeight / 2)
+			
+			this.commandList.scrollTop = Math.max(0, targetScrollTop)
+			
+			// 保存搜索状态，等待渲染
+			EventEditor.search.pendingQuery = query
+			EventEditor.search.dataMatches = dataMatches
+			
+			// 延迟后重新搜索
+			setTimeout(() => {
+				if (EventEditor.search.pendingQuery === query) {
+					EventEditor.handleSearch(query)
+				}
+			}, 200)
+			
+			return
+		}
+	}
+	
+	// 搜索已渲染的元素
+	for (let i = 0; i < elements.count; i++) {
+		const element = elements[i]
+		if (!element) {
+			continue
+		}
+		
+		if (!element.dataItem) {
+			continue
+		}
+		
+		// 获取元素的所有文本内容
+		const textElements = element.querySelectorAll('command-text')
+		let elementText = ''
+		let firstText = '' // 保存第一个文本元素的内容，通常是命令名称
+		
+		// 如果没有command-text元素，尝试获取整个元素的文本
+		if (textElements.length === 0) {
+			elementText = element.textContent || ''
+			firstText = elementText
+		} else {
+			for (let j = 0; j < textElements.length; j++) {
+				const textEl = textElements[j]
+				const text = textEl.textContent
+				elementText += text + ' '
+				if (j === 0) {
+					firstText = text
+				}
+			}
+		}
+		
+		// 检查是否匹配
+		let isMatch = false
+		let matchPriority = 0 // 匹配优先级：0=不匹配，1=部分匹配，2=精确匹配
+		
+		// 优先检查第一个文本（命令名称）是否精确匹配
+		if (firstText.toLowerCase() === queryLower) {
+			isMatch = true
+			matchPriority = 2
+		} else if (firstText.toLowerCase().includes(queryLower)) {
+			isMatch = true
+			matchPriority = 1.5 // 命令名称部分匹配
+		} else if (elementText.toLowerCase().includes(queryLower)) {
+			isMatch = true
+			matchPriority = 1
+		}
+		
+		if (isMatch) {
+			
+			// 保存匹配信息
+			matchedElements.push({
+				element: element,
+				index: i,
+				text: elementText,
+				command: element.dataItem,
+				priority: matchPriority,
+				firstText: firstText
+			})
+			
+			// 高亮匹配的文本
+			if (textElements.length > 0) {
+				for (const textEl of textElements) {
+					const content = textEl.textContent
+					if (content.toLowerCase().includes(queryLower)) {
+						this.highlightText(textEl, query)
+					}
+				}
+			}
+		}
+	}
+	
+	// 如果有折叠的元素，需要展开并搜索
+	if (matchedElements.length === 0) {
+		this.searchInFoldedElements(query)
+	} else {
+		// 按优先级排序匹配结果
+		matchedElements.sort((a, b) => {
+			// 先按优先级排序（高优先级在前）
+			if (b.priority !== a.priority) {
+				return b.priority - a.priority
+			}
+			// 优先级相同则按索引排序
+			return a.index - b.index
+		})
+		
+		EventEditor.search.matches = matchedElements
+		
+		// 显示第一个结果
+		if (matchedElements.length > 0) {
+			EventEditor.search.currentIndex = 0
+			this.navigateToMatch(0)
+			
+			// 更新计数器
+			if (counter) {
+				counter.textContent = `1/${matchedElements.length}`
+			}
+		}
+	}
+}
+
+// 清除高亮
+EventEditor.clearHighlights = function () {
+	const highlightedElements = this.commandList.querySelectorAll('.event-search-highlight, .event-search-current')
+	for (const el of highlightedElements) {
+		el.classList.remove('event-search-highlight', 'event-search-current')
+	}
+}
+
+// 高亮文本
+EventEditor.highlightText = function (textElement, query) {
+	// 只添加高亮类，不修改文本内容
+	textElement.classList.add('event-search-highlight')
+}
+
+// 导航到匹配项
+EventEditor.navigateToMatch = function (index) {
+	if (!EventEditor.search.matches[index]) return
+	
+	const match = EventEditor.search.matches[index]
+	const element = match.element
+	
+	// 清除之前的当前高亮
+	const prevCurrent = this.commandList.querySelector('.event-search-current')
+	if (prevCurrent) {
+		prevCurrent.classList.remove('event-search-current')
+		prevCurrent.classList.add('event-search-highlight')
+	}
+	
+	// 高亮当前匹配
+	const textElements = element.querySelectorAll('.event-search-highlight')
+	if (textElements.length > 0) {
+		textElements[0].classList.add('event-search-current')
+	}
+	
+	// 滚动到元素
+	this.scrollToElement(element)
+}
+
+// 滚动到元素
+EventEditor.scrollToElement = function (element) {
+	const container = this.commandList
+	
+	// 获取元素在elements数组中的索引
+	const elements = container.elements
+	let elementIndex = -1
+	for (let i = 0; i < elements.count; i++) {
+		if (elements[i] === element) {
+			elementIndex = i
+			break
+		}
+	}
+	
+	if (elementIndex === -1) {
+		return
+	}
+	
+	// 每个元素高度为20px
+	const elementHeight = 20
+	const elementTop = elementIndex * elementHeight
+	const containerHeight = container.clientHeight
+	
+	// 计算目标滚动位置，让元素在容器中央
+	const targetScrollTop = elementTop - (containerHeight / 2) + (elementHeight / 2)
+	
+	const elementRect = element.getBoundingClientRect()
+	const containerRect = container.getBoundingClientRect()
+	
+	
+	// 确保元素在视图中
+	if (elementRect.top < containerRect.top || elementRect.bottom > containerRect.bottom) {
+		// 先尝试使用原生方法
+		try {
+			element.scrollIntoView({
+				behavior: 'smooth',
+				block: 'center',
+				inline: 'nearest'
+			})
+		} catch (e) {
+			// 备用方法：手动设置scrollTop
+			container.scrollTop = Math.max(0, targetScrollTop)
+		}
+	} else {
+	}
+}
+
+// 搜索折叠的元素
+EventEditor.searchInFoldedElements = function (query) {
+	
+	// 直接搜索原始命令数据
+	const data = this.commandList.data
+	if (!data || data.length === 0) {
+		return
+	}
+	
+	const queryLower = query.toLowerCase()
+	const counter = document.getElementById('event-search-counter')
+	
+	// 递归搜索函数
+	const searchInData = (commands, parentPath = []) => {
+		for (let i = 0; i < commands.length; i++) {
+			const command = commands[i]
+			const path = [...parentPath, i]
+			
+			// 获取命令ID对应的本地化文本
+			let commandName = ''
+			if (command.id) {
+				// 尝试获取本地化的命令名称
+				const localKey = 'command.' + command.id
+				commandName = Local.get(localKey)
+				if (commandName === localKey) {
+					// 如果没有本地化，使用命令ID
+					commandName = command.id
+				}
+				
+				// 特殊处理一些常见的设置命令
+				if (command.id === 'setting' || command.id === 'settings') {
+				}
+			}
+			
+			// 只对有意义的命令输出调试信息
+			if (commandName && commandName !== command.id) {
+				}
+			
+			// 检查命令名称是否匹配
+			if (commandName.toLowerCase() === queryLower) {
+					
+				// 展开所有父级折叠
+				this.expandPath(path)
+				
+				// 延迟后重新搜索
+				setTimeout(() => {
+					this.handleSearch(query)
+				}, 300)
+				return
+			}
+			
+			// 递归搜索子命令（支持两种格式）
+			let subCommands = null
+			if (command.commands && Array.isArray(command.commands)) {
+				subCommands = command.commands
+			} else if (command.params && command.params.commands && Array.isArray(command.params.commands)) {
+				subCommands = command.params.commands
+			}
+			
+			if (subCommands) {
+				searchInData(subCommands, path)
+			}
+		}
+	}
+	
+	searchInData(data)
+}
+
+// 展开路径上的所有折叠元素
+EventEditor.expandPath = function (path) {
+	
+	const elements = this.commandList.elements
+	let currentData = this.commandList.data
+	
+	// 遍历路径，展开每一级
+	for (let i = 0; i < path.length; i++) {
+		const index = path[i]
+		
+		// 找到对应的元素并展开
+		for (let j = 0; j < elements.count; j++) {
+			const element = elements[j]
+			if (element && element.dataItem === currentData[index]) {
+				if (element.dataItem.folded) {
+					// 模拟点击折叠按钮
+					const foldButton = element.querySelector('command-fold')
+					if (foldButton) {
+						foldButton.click()
+					}
+				}
+				break
+			}
+		}
+		
+		// 进入下一级（支持两种格式）
+		if (currentData[index]) {
+			if (currentData[index].commands) {
+				currentData = currentData[index].commands
+			} else if (currentData[index].params && currentData[index].params.commands) {
+				currentData = currentData[index].params.commands
+			}
+		}
+	}
+	
+	// 强制更新命令列表
+	this.commandList.update()
+}
+
+// 导航搜索
+EventEditor.navigateSearch = function (direction) {
+	if (EventEditor.search.matches.length === 0) {
+		return
+	}
+	
+	// 清除之前的当前高亮
+	const prevMatch = EventEditor.search.matches[EventEditor.search.currentIndex]
+	if (prevMatch) {
+		const prevHighlights = prevMatch.element.querySelectorAll('.event-search-current')
+		for (const el of prevHighlights) {
+			el.classList.remove('event-search-current')
+			el.classList.add('event-search-highlight')
+		}
+	}
+	
+	if (direction === 'next') {
+		EventEditor.search.currentIndex = (EventEditor.search.currentIndex + 1) % EventEditor.search.matches.length
+	} else {
+		EventEditor.search.currentIndex = (EventEditor.search.currentIndex - 1 + EventEditor.search.matches.length) % EventEditor.search.matches.length
+	}
+	
+	const current = EventEditor.search.matches[EventEditor.search.currentIndex]
+	
+	// 导航到新的匹配项
+	this.navigateToMatch(EventEditor.search.currentIndex)
+	
+	// 更新计数器
+	const counter = document.getElementById('event-search-counter')
+	if (counter) {
+		counter.textContent = `${EventEditor.search.currentIndex + 1}/${EventEditor.search.matches.length}`
+	}
+}
+
+// 清除搜索
+EventEditor.clearSearch = function () {
+	EventEditor.search.query = ''
+	EventEditor.search.matches = []
+	EventEditor.search.currentIndex = -1
+	
+	// 清除高亮
+	this.clearHighlights()
+}
+*/
 
 // 指令列表 - 更新事件
 EventEditor.commandListUpdate = function (event) {

@@ -32,6 +32,8 @@
   <script src="Script/_browser.js" defer></script>
   <script src="Script/_inspector.js" defer></script>
   <script src="Script/_command.js" defer></script>
+  <script src="Script/_event_search.js" defer></script>
+  <script src="Script/_auto_expand.js" defer></script>
   <script src="Script/_log.js" defer></script>
   <script src="Script/_update.js" defer></script>
   <script src="Script/_steamworks.js" defer></script>
@@ -40,7 +42,6 @@
   <script src="Script/module/command/getObjectProperty.js" defer></script>
   <script src="Script/module/command/requestURL.js" defer></script>
   <!-- 模块 -->
-  <script src="Script/module/_searchstring.js" defer></script>
   <script src="Script/module/_settingconfig.js" defer></script>
   <script src="Script/module/_webserver.js" defer></script>
   <script src="Script/module/_apkbuilder.js" defer></script>
@@ -2159,7 +2160,7 @@
     </page-manager>
   </box>
 
-  <!-- Open设置窗口 -->
+  <!-- 设置窗口 -->
   <window-frame id="setting">
     <title-bar id="setting-title">Setting<maximize></maximize>
       <close></close>
@@ -2167,21 +2168,7 @@
     <content-frame>
       <grid-box id="setting-grid">
         <text id="setting-title-server" class="setting-title">Server</text>
-        <text></text><number-box id="setting-server-port" min="0" max="65535"></number-box>
-        <text id="setting-title-apkbuild" class="setting-title">APK Build</text>
-        <text></text><text-box id="setting-apkbuild-outputDir"></text-box>
-        <text></text><text-box id="setting-apkbuild-newApkPath"></text-box>
-        <text></text><text-box id="setting-apkbuild-apktoolPath"></text-box>
-        <text id="setting-title-signed" class="setting-title">签名配置</text>
-        <text></text><text-box id="setting-signed-jksPath"></text-box>
-        <text></text><text-box id="setting-signed-keyStorePassword"></text-box>
-        <text></text><text-box id="setting-signed-keyAlias"></text-box>
-        <text></text><text-box id="setting-signed-keyPassword"></text-box>
-        <text></text><text-box id="setting-signed-apksignerPath"></text-box>
-        <text></text><text-box id="setting-signed-zipalignPath"></text-box>
-        <text></text><text-box id="setting-signed-signedApkPath"></text-box>
-        <text id="setting-title-other" class="setting-title">other</text>
-        <text></text><check-box id="setting-other-copyAsTextKeepEmptyLine" class="standard"></check-box>
+        <text>Port</text><number-box id="setting-server-port" min="0" max="65535"></number-box>
       </grid-box>
       <button id="setting-confirm" name="confirm">Confirm</button>
       <button id="setting-cancel" name="cancel">Cancel</button>
@@ -2969,11 +2956,22 @@
           <text>应用包名</text><text-box id="export-apk-apkPackageName"></text-box>
           <text>应用版本</text><text-box id="export-apk-apkVersionName"></text-box>
           <text>应用版本号</text><text-box id="export-apk-apkVersionCode"></text-box>
+          <text class="project-summary">反编译配置</text>
+          <text>反编译输出目录</text><text-box id="export-apk-outputDir"></text-box>
+          <text>新APK输出路径</text><text-box id="export-apk-newApkPath"></text-box>
+          <text>apktool.jar路径</text><text-box id="export-apk-apktoolPath"></text-box>
+          <text class="project-summary">签名配置</text>
+          <text>JKS密钥库路径</text><text-box id="export-apk-jksPath"></text-box>
+          <text>密钥库密码</text><text-box id="export-apk-keyStorePassword"></text-box>
+          <text>密钥别名</text><text-box id="export-apk-keyAlias"></text-box>
+          <text>密钥密码</text><text-box id="export-apk-keyPassword"></text-box>
+          <text>apksigner路径</text><text-box id="export-apk-apksignerPath"></text-box>
+          <text>zipalign路径</text><text-box id="export-apk-zipalignPath"></text-box>
+          <text>签名后APK路径</text><text-box id="export-apk-signedApkPath"></text-box>
         </grid-box>
         <box id="export-apk-PS">
           <text class="project-summary export-apk-major">PS（温馨提示）</text>
           <text class="export-apk-major">构建前请确保您安装了Java，apktool（内置）、apksigner（内置）、zipalign（内置）工具</text>
-          <text class="export-apk-major">构建前请确保您的项目路径不包含中文、且.preview文件夹存在(ctrl+s保存可快速创建)</text>
           <text class="export-apk-major">模板包无内置Taptap和生命周期，因此（移动端-API.指令）插件的部分功能无法使用，如需使用请自行构建<text class="href"
               href="https://github.com/Open-Yami-Community/yamiexample">示例项目</text></text>
           <text class="export-apk-major">@表示编辑器模板目录、$表示项目目录apk文件夹、~表示项目目录</text>
@@ -3305,22 +3303,6 @@
     </content-frame>
   </window-frame>
 
-  <!-- 搜索字符串 -->
-  <window-frame id="event-search-string">
-    <title-bar>Search String<close></close></title-bar>
-    <content-frame>
-      <grid-box>
-        <text></text><text-box id="event-search-string-search"></text-box>
-        <text></text><check-box id="event-search-string-case-insensitive" class="standard"></check-box>
-        <text></text><check-box id="event-search-string-regex" class="standard"></check-box>
-        <text></text><check-box id="event-search-string-match-line" class="standard"></check-box>
-        <text id="event-search-string-log"></text>
-      </grid-box>
-      <button id="event-search-string-previous" name="previous">上一个</button>
-      <button id="event-search-string-next" name="next">下一个</button>
-    </content-frame>
-  </window-frame>
-
   <!-- 事件窗口 -->
   <window-frame id="event" class="opaque">
     <title-bar id="event-title">Event<maximize></maximize>
@@ -3329,10 +3311,15 @@
     <content-frame>
       <field-set id="event-open-fieldset" class="input pad">
         <legend>Event</legend>
-        <node-list id="event-open-list"></node-list>
+        <input type="text" id="event-search-box" placeholder="搜索事件..." style="position: absolute; top: 20px; left: 10px; right: 10px; width: calc(100% - 20px); height: 24px; padding: 4px 8px; background-color: #333; border: 1px solid #555; color: #fff; font-size: 12px;">
+        <node-list id="event-open-list" style="position: absolute; top: 54px; padding: 10px 0; width: 100%; height: calc(100% - 54px);"></node-list>
       </field-set>
       <field-set id="event-commands-fieldset" class="input pad">
         <legend>Content</legend>
+        <input type="text" id="event-content-search-box" placeholder="搜索命令..." style="position: absolute; top: 20px; right: 180px; width: 150px; height: 26px; padding: 4px 8px; background-color: #333; border: 1px solid #555; color: #fff; font-size: 12px; z-index: 100; border-radius: 0; box-sizing: border-box;">
+        <button id="event-search-prev" title="上一个匹配项 (Shift+F3)" style="position: absolute; top: 20px; right: 150px; width: 26px; height: 26px; background-color: #444; border: 1px solid #555; color: #fff; font-size: 12px; z-index: 100; cursor: pointer; border-radius: 0; box-sizing: border-box;">▲</button>
+        <button id="event-search-next" title="下一个匹配项 (F3)" style="position: absolute; top: 20px; right: 120px; width: 26px; height: 26px; background-color: #444; border: 1px solid #555; color: #fff; font-size: 12px; z-index: 100; cursor: pointer; border-radius: 0; box-sizing: border-box;">▼</button>
+        <button id="event-search-close" title="关闭搜索框 (ESC)" style="position: absolute; top: 20px; right: 90px; width: 26px; height: 26px; background-color: #444; border: 1px solid #555; color: #fff; font-size: 14px; z-index: 100; cursor: pointer; font-family: monospace; border-radius: 0; box-sizing: border-box;">×</button>
         <box id="event-commands-gutter-background"></box>
         <command-list id="event-commands"></command-list>
         <box id="event-commands-gutter-outer">
