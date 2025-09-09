@@ -8,6 +8,8 @@ PS：目前项目只构建了 `Windows` 版本，其他版本请自行构建
 
 PS：目前项目多语言只维护`中文`、`english`语言包，其他语言我们暂不维护（多余的维护成本）
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Open-Yami-Community/yami-rpg-editor)
+
 ## 
 
 ![Yami_RPG_Editor](https://shared.cdn.queniuqe.com/store_item_assets/steam/apps/1964480/header.jpg?t=1742510557)
