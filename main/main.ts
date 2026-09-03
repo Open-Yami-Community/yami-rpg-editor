@@ -336,8 +336,12 @@ app.on('ready', () => {
 	const dirs = fs.readdirSync(extensionPath);
 	dirs.forEach(async (v) => {
 		try {
-			await session.defaultSession.loadExtension(v);
-		} catch {}
+			const p = path.resolve(extensionPath, v);
+			await session.defaultSession.loadExtension(p, { allowFileAccess: true });
+			console.log(`Loaded extension: ${v}`);
+		} catch (err) {
+			console.error(`Failed to load extension: ${v}`, err);
+		}
 	});
 });
 

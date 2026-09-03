@@ -47,6 +47,8 @@
 	};
 
 	const drop = function (event: DragEvent): void {
+		event.preventDefault();
+		event.stopPropagation();
 		if (osdragging) {
 			osdragging = false;
 			window.dispatchEvent(new DragEvent('os-dragend'));
