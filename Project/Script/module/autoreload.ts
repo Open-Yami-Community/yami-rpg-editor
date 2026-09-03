@@ -8,6 +8,7 @@ import { Data } from '@/data/data-object.ts';
 import { Scene } from '@/scene/scene-window.ts';
 import { Updater } from '@/update/updater.ts';
 import { EventEditor } from '@/command/event-editor.ts';
+import { Inspector } from '@/inspector/inspector.ts';
 import { SettingConfig } from '@/module/settingconfig';
 import nodeFs from 'node:fs';
 import nodePath from 'node:path';
@@ -88,11 +89,15 @@ export const AutoReload = new (class AutoReload {
 		const root = File.path('Assets');
 		if (!root || !nodeFs.existsSync(root)) return;
 		this.watchedRoot = root;
-		this.watcher = nodeFs.watch(root, { recursive: true }, (eventType, filename) => {
-			if (eventType !== 'change' || !filename) return;
+		this.watcher = nodeFs.watch(root, { recursive: true }, (_eventType, filename) => {
+			if (!filename) return;
 			// 忽略编译产物与临时文件
 			if (/\.(js|js\.map|tsbuildinfo)$/i.test(filename)) return;
 			this.schedule(nodePath.join(root, String(filename)));
+		});
+		this.watcher.on('error', (error) => {
+			console.warn('[AutoReload] 监听异常:', error);
+			this.stopWatcher();
 		});
 		console.log('[AutoReload] 监听已启动:', root);
 	}
@@ -123,6 +128,8 @@ export const AutoReload = new (class AutoReload {
 	// 重读单个数据文件
 	async reloadFile(absPath: string) {
 		if (!File.root) return;
+		if (!nodeFs.existsSync(absPath)) return;
+
 		const assetsRoot = File.path('Assets');
 		let relative = nodePath.relative(assetsRoot, absPath);
 		if (relative.startsWith('..') || nodePath.isAbsolute(relative)) return;
@@ -132,7 +139,18 @@ export const AutoReload = new (class AutoReload {
 		const mapName = AutoReload.dataExtnameMap[ext];
 		if (!mapName) return;
 
-		const meta = Data.manifest.pathMap[relative];
+		let meta = Data.manifest.pathMap[relative];
+		if (!meta) {
+			// Windows 大小写不敏感回退匹配
+			const lowerRelative = relative.toLowerCase();
+			for (const key in Data.manifest.pathMap) {
+				if (key.toLowerCase() === lowerRelative) {
+					meta = Data.manifest.pathMap[key];
+					relative = key;
+					break;
+				}
+			}
+		}
 		if (!meta || !meta.guid) return;
 
 		// 编辑器内有未保存改动时跳过
@@ -169,6 +187,9 @@ export const AutoReload = new (class AutoReload {
 					break;
 			}
 
+			// 刷新属性检查器（若当前正打开该实体）
+			this.refreshInspector(meta, data);
+
 			// 刷新事件编辑器
 			this.refreshEventEditor(meta.guid);
 
@@ -176,6 +197,16 @@ export const AutoReload = new (class AutoReload {
 		} catch (error: any) {
 			// 文件写入未完成等瞬态错误：忽略，等待下一次事件
 			console.warn('[AutoReload] 重载失败（忽略）:', relative, error?.message);
+		}
+	}
+
+	// 刷新属性检查器当前打开项
+	refreshInspector(meta: any, data: any) {
+		if (Inspector.meta === meta && Inspector.type && (Inspector as any)[Inspector.type]) {
+			const page = (Inspector as any)[Inspector.type];
+			page.target = null;
+			page.meta = null;
+			page.open(data, meta);
 		}
 	}
 
@@ -206,11 +237,11 @@ export const AutoReload = new (class AutoReload {
 				const absPath = nodePath.join(root, rel);
 				try {
 					map.set(absPath, Number(nodeFs.statSync(absPath).mtimeMs));
-				} catch (error) {
+				} catch (_error) {
 					// 文件刚被删除等情况，忽略
 				}
 			}
-		} catch (error) {
+		} catch (_error) {
 			// readdirSync recursive 不可用等异常：本次跳过
 		}
 		return map;
