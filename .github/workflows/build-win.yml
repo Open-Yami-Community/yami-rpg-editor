@@ -31,23 +31,21 @@ jobs:
       - name: Build Assets & Bundles
         run: pnpm run build:all
 
-      - name: Build Windows x64
+      - name: Build Windows x64 Portable Directory
         run: |
-          pnpm exec electron-builder --win --x64 --publish never
+          pnpm exec electron-builder --dir --win --x64 --publish never
 
-      - name: Create Portable Zip from Unpacked
+      - name: Pack Portable Content to Zip
         shell: pwsh
         run: |
           if (Test-Path "build/win-unpacked") {
-            Compress-Archive -Path "build/win-unpacked/*" -DestinationPath "build/Open-Yami-RPG-Editor-win-x64-portable.zip" -Force
-            Write-Host "Portable zip package created."
+            Compress-Archive -Path "build/win-unpacked/*" -DestinationPath "build/Open-Yami-RPG-Editor-win-x64.zip" -Force
+            Write-Host "Portable zip created: build/Open-Yami-RPG-Editor-win-x64.zip"
           }
 
-      - name: Upload Build Artifacts
+      - name: Upload Single Zip Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Open-Yami-RPG-Editor-win-x64-v43.2.0
-          path: |
-            build/Open-Yami-RPG-Editor-win-x64-portable.zip
-            build/*.exe
+          name: Open-Yami-RPG-Editor-win-x64
+          path: build/Open-Yami-RPG-Editor-win-x64.zip
           retention-days: 30
