@@ -972,7 +972,7 @@ export class FileBodyPane extends HTMLElement {
 		}
 		if (!targetPath) return;
 		const copy = (Clipboard as any).read('yami.files');
-		if (copy) {
+		if (copy && Array.isArray(copy.guids)) {
 			const files: any[] = [];
 			for (const guid of copy.guids) {
 				const meta = (Data as any).manifest.guidMap[guid];

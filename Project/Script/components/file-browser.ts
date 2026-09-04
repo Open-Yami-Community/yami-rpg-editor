@@ -479,6 +479,8 @@ export class FileBrowser extends HTMLElement {
 	}
 
 	osDrop(event: DragEvent): void {
+		event.preventDefault();
+		event.stopPropagation();
 		const { files } = (event as any).dataTransfer;
 		if (files.length === 0) {
 			return;
@@ -489,7 +491,14 @@ export class FileBrowser extends HTMLElement {
 			if (!dropPath) return;
 			dropPath = File.path(dropPath);
 			const map = Array.prototype.map;
-			const paths = map.call(files, (file: any) => file.path);
+			const paths = map.call(files, (file: any) => {
+				return (
+					file.path ||
+					(require('electron').webUtils?.getPathForFile
+						? require('electron').webUtils.getPathForFile(file)
+						: '')
+				);
+			});
 			(Directory as any)
 				.readdir(paths)
 				.then((dir: any[]) => {

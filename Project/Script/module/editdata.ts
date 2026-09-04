@@ -1,3 +1,4 @@
+import { clipboard } from 'electron';
 import { $ } from '@/util/dom.ts';
 import { Command } from '@/command/command-object.ts';
 import { Title } from '@/title/title-bar.ts';
@@ -57,15 +58,26 @@ export const EditDataInstance = new (class {
 			}
 		});
 
-		this.editorParent.on('keydown', (event) => {
-			if (event.target.hasClass('inputarea')) {
-				switch (event.code) {
-					case 'Enter':
-						event.stopPropagation();
-						break;
+		this.editorParent.on(
+			'keydown',
+			(event) => {
+				const isEditor =
+					this.editor?.hasTextFocus?.() ||
+					this.editorDom.contains(document.activeElement) ||
+					this.editorDom.contains(event.target);
+				if (isEditor) {
+					switch (event.code) {
+						case 'Enter':
+						case 'NumpadEnter':
+							if (!event.ctrlKey && !event.metaKey) {
+								event.stopPropagation();
+							}
+							break;
+					}
 				}
-			}
-		});
+			},
+			{ capture: true }
+		);
 
 		this.editorParent.on('closed', () => {
 			this.model.setValue('');
@@ -120,6 +132,22 @@ export const EditDataInstance = new (class {
 			return null;
 		} catch {
 			return null;
+		}
+	}
+
+	pasteText() {
+		const text = clipboard.readText();
+		if (!text || !this.editor) return;
+		const selection = this.editor.getSelection();
+		if (selection) {
+			this.editor.executeEdits('clipboard-paste', [
+				{
+					range: selection,
+					text: text,
+					forceMoveMarkers: true
+				}
+			]);
+			this.editor.pushUndoStop();
 		}
 	}
 
@@ -239,19 +267,49 @@ export const EditDataInstance = new (class {
 
 			this.model = this.editor.getModel();
 
+			// 拦截原生 paste 事件保证粘贴有效
+			this.editorDom.on('paste', (event: any) => {
+				event.preventDefault();
+				event.stopPropagation();
+				this.pasteText();
+			});
+
+			// 注册 Monaco 粘贴 Action（支持快捷键与右键菜单）
+			this.editor.addAction({
+				id: 'editor.action.clipboardPasteAction',
+				label: 'Paste',
+				keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyV],
+				run: () => {
+					this.pasteText();
+				}
+			});
+
 			// 编辑器 - 获得焦点
 			this.editor.getFocus = function () {
 				setTimeout(() => this.focus());
 			};
 
 			this.editor.onKeyDown((event) => {
-				event = event.browserEvent;
-				if (event.ctrlKey) {
-					switch (event.code) {
+				const browserEvent = event.browserEvent;
+				if (browserEvent.ctrlKey || browserEvent.metaKey) {
+					switch (browserEvent.code) {
 						case 'Enter':
-							event.preventDefault();
-							event.stopPropagation();
-							// this.save()
+						case 'NumpadEnter':
+							browserEvent.preventDefault();
+							browserEvent.stopPropagation();
+							this.save();
+							break;
+						case 'KeyV':
+							browserEvent.preventDefault();
+							browserEvent.stopPropagation();
+							this.pasteText();
+							break;
+					}
+				} else {
+					switch (browserEvent.code) {
+						case 'Enter':
+						case 'NumpadEnter':
+							browserEvent.stopPropagation();
 							break;
 					}
 				}
