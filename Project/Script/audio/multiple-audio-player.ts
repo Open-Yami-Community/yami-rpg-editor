@@ -1,3 +1,4 @@
+import { File } from '@/file/file-system-core.ts';
 import { AudioManager } from './audio-manager.ts';
 
 // HTMLAudioElement 运行时挂载的扩展字段（getAudio 内赋值）
@@ -45,6 +46,25 @@ export class MultipleAudioPlayer {
 			}
 		}
 		return undefined;
+	}
+
+	/** 播放音效 */
+	play(guid: string, volume: number = 1): MultipleAudioElement | undefined {
+		if (guid) {
+			const path = File.getPath(guid);
+			if (!path) return undefined;
+			const audio = this.getRecentlyAudio(guid);
+			if (audio) {
+				audio.volume = Math.clamp(volume, 0, 1);
+				return audio;
+			} else {
+				const audio = this.getAudio();
+				audio.guid = guid;
+				audio.src = File.route(path);
+				audio.volume = Math.clamp(volume, 0, 1);
+				return audio;
+			}
+		}
 	}
 
 	/** 停止播放 */

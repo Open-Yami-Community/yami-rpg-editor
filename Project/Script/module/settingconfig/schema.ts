@@ -119,6 +119,27 @@ export const settingSchema: SettingSection[] = [
 		]
 	},
 	{
+		id: 'autoReload',
+		options: [
+			{
+				key: 'enabled',
+				type: 'checkbox',
+				default: false
+			},
+			{
+				key: 'pollInterval',
+				type: 'number',
+				default: 5,
+				min: 0,
+				max: 3600,
+				validate: (v) => {
+					const n = Number(v);
+					return Number.isInteger(n) && n >= 0 && n <= 3600 ? null : '0-3600';
+				}
+			}
+		]
+	},
+	{
 		id: 'update',
 		titleKey: 'setting-title-update',
 		titleFallback: 'Update',

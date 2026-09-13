@@ -2876,6 +2876,9 @@
     "setting-other-browserSearchHistoryLimit": {"label": "Project Search History Limit", "tip": "Maximum number of search history entries shown in the project browser search dropdown"},
     "setting-title-github": {"content": "GitHub"},
     "setting-github-accelerationNode": {"label": "Acceleration Node", "tip": "Select the acceleration node for GitHub resource downloads"},
+    "setting-title-autoReload": {"content": "Auto Reload"},
+    "setting-autoReload-enabled": {"label": "Auto reload external changes", "tip": "Watch external changes of Assets data files and reload them into the editor automatically, takes effect immediately after saving settings"},
+    "setting-autoReload-pollInterval": {"label": "Poll fallback interval (s)", "tip": "Fallback polling interval to guard against missed filesystem events, 0 to disable polling"},
 
     "[comment]": "********** Auto Tile **********",
     "autoTile": {"title": "Auto Tile"},

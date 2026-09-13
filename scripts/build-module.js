@@ -363,6 +363,7 @@ const realEsmExclude = new Set([
 	'Script/module/resource.ts',
 	'Script/module/searchstring.ts',
 	'Script/module/settingconfig.ts',
+	'Script/module/autoreload.ts',
 	'Script/module/webserver.ts',
 	'Script/palette/auto-tile.ts',
 	'Script/palette/palette.ts',

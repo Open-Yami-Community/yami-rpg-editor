@@ -247,7 +247,15 @@ Window.keydown = function (event) {
 			case 'Enter':
 			case 'NumpadEnter': {
 				const active = document.activeElement;
-				if (active instanceof HTMLButtonElement && !event.cmdOrCtrlKey) {
+				if (
+					(active instanceof HTMLButtonElement ||
+						active instanceof HTMLTextAreaElement ||
+						(active as HTMLElement)?.closest?.('.monaco-editor') ||
+						(active as HTMLElement)?.closest?.('text-area') ||
+						(active as HTMLElement)?.closest?.('#script-script') ||
+						(active as HTMLElement)?.closest?.('#edit-data-current')) &&
+					!event.cmdOrCtrlKey
+				) {
 					return;
 				}
 				const frames = Window.frames;

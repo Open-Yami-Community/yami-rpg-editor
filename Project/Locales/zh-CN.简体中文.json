@@ -2877,6 +2877,9 @@
     "setting-other-browserSearchHistoryLimit": {"label": "项目搜索历史上限", "tip": "项目浏览器搜索框下拉列表最多显示的历史记录条数"},
     "setting-title-github": {"content": "GitHub"},
     "setting-github-accelerationNode": {"label": "加速节点", "tip": "选择GitHub资源下载的加速节点"},
+    "setting-title-autoReload": {"content": "自动重载"},
+    "setting-autoReload-enabled": {"label": "自动重载外部修改", "tip": "监听 Assets 数据文件的外部修改并自动重读进编辑器，保存设置后立即生效"},
+    "setting-autoReload-pollInterval": {"label": "轮询兜底间隔(秒)", "tip": "防止系统监听漏报的兜底轮询间隔，0 为禁用兜底轮询"},
 
     "[comment]": "********** 自动图块 **********",
     "autoTile": {"title": "自动图块"},

@@ -120,5 +120,9 @@ export const SettingConfig = new (class {
 		if (WebServer.port !== this.config.server.port) {
 			WebServer.port = this.config.server.port;
 		}
+		// 自动重载
+		if ((window as any).AutoReload) {
+			(window as any).AutoReload.applyConfig();
+		}
 	}
 })();

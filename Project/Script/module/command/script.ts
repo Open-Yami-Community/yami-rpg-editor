@@ -1,4 +1,4 @@
-import { ipcRenderer } from 'electron';
+import { ipcRenderer, clipboard } from 'electron';
 import { $ } from '@/util/dom.ts';
 import { Command } from '@/command/command-object.ts';
 import { Editor } from '@/main/editor.ts';
@@ -87,15 +87,26 @@ Command.cases.script = new CommandSchema({
 			this.model.setValue('');
 		});
 
-		$('#script').on('keydown', (event) => {
-			if (event.target.hasClass('inputarea')) {
-				switch (event.code) {
-					case 'Enter':
-						event.stopPropagation();
-						break;
+		$('#script').on(
+			'keydown',
+			(event) => {
+				const isEditor =
+					this.editor?.hasTextFocus?.() ||
+					$('#script-script').contains(document.activeElement) ||
+					$('#script-script').contains(event.target);
+				if (isEditor) {
+					switch (event.code) {
+						case 'Enter':
+						case 'NumpadEnter':
+							if (!event.ctrlKey && !event.metaKey) {
+								event.stopPropagation();
+							}
+							break;
+					}
 				}
-			}
-		});
+			},
+			{ capture: true }
+		);
 	},
 	customParse({ script }) {
 		const contents: any[] = [{ script: script }];
@@ -174,6 +185,21 @@ Command.cases.script = new CommandSchema({
 			}
 		}
 	},
+	pasteText() {
+		const text = clipboard.readText();
+		if (!text || !this.editor) return;
+		const selection = this.editor.getSelection();
+		if (selection) {
+			this.editor.executeEdits('clipboard-paste', [
+				{
+					range: selection,
+					text: text,
+					forceMoveMarkers: true
+				}
+			]);
+			this.editor.pushUndoStop();
+		}
+	},
 	createEditor() {
 		const { theme } = Title;
 		this.createTheme(theme);
@@ -212,6 +238,23 @@ Command.cases.script = new CommandSchema({
 		});
 		this.model = this.editor.getModel();
 
+		// 拦截原生 paste 事件保证粘贴有效
+		$('#script-script').on('paste', (event: any) => {
+			event.preventDefault();
+			event.stopPropagation();
+			this.pasteText();
+		});
+
+		// 注册 Monaco 粘贴 Action（支持快捷键与右键菜单）
+		this.editor.addAction({
+			id: 'editor.action.clipboardPasteAction',
+			label: 'Paste',
+			keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyV],
+			run: () => {
+				this.pasteText();
+			}
+		});
+
 		$('#script-change').on('click', () => {
 			const currentLanguage = this.editor.getModel().getLanguageId();
 			let languageId = currentLanguage === 'javascript' ? 'typescript' : 'javascript';
@@ -229,13 +272,26 @@ Command.cases.script = new CommandSchema({
 		};
 
 		this.editor.onKeyDown((event) => {
-			event = event.browserEvent;
-			if (event.ctrlKey) {
-				switch (event.code) {
+			const browserEvent = event.browserEvent;
+			if (browserEvent.ctrlKey || browserEvent.metaKey) {
+				switch (browserEvent.code) {
 					case 'Enter':
-						event.preventDefault();
-						event.stopPropagation();
+					case 'NumpadEnter':
+						browserEvent.preventDefault();
+						browserEvent.stopPropagation();
 						this.save();
+						break;
+					case 'KeyV':
+						browserEvent.preventDefault();
+						browserEvent.stopPropagation();
+						this.pasteText();
+						break;
+				}
+			} else {
+				switch (browserEvent.code) {
+					case 'Enter':
+					case 'NumpadEnter':
+						browserEvent.stopPropagation();
 						break;
 				}
 			}

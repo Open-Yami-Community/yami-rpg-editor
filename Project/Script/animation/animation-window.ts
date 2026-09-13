@@ -1588,7 +1588,7 @@ Animation.updateSoundContexts = function () {
 			if (frame && frame.start === index && context.version !== index) {
 				context.version = index;
 				if (frame.sound) {
-					AudioManager.se.play(frame.sound, frame.volume);
+					AudioManager.se?.play?.(frame.sound, frame.volume);
 				}
 			}
 		}
@@ -1609,7 +1609,7 @@ Animation.resetSoundContexts = function () {
 };
 
 Animation.stopPlayingSound = function () {
-	AudioManager.se?.stop();
+	AudioManager.se?.stop?.();
 };
 
 Animation.updateControlPoints = function (context) {
